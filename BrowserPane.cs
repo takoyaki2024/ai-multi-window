@@ -77,21 +77,25 @@ public sealed class BrowserPane : Grid
 
         Loaded += async (_, _) =>
         {
-            if (_webView.CoreWebView2 is null)
+            if (_webView.CoreWebView2 is not null)
+                return;
+
+            await _webView.EnsureCoreWebView2Async();
+            var core = _webView.CoreWebView2;
+            if (core is null)
+                return;
+
+            core.Settings.AreDevToolsEnabled = true;
+            core.Settings.AreDefaultContextMenusEnabled = true;
+            core.Settings.IsZoomControlEnabled = true;
+            core.HistoryChanged += (_, _) => UpdateNavigationButtons();
+            core.NavigationCompleted += (_, _) =>
             {
-                await _webView.EnsureCoreWebView2Async();
-                _webView.CoreWebView2.Settings.AreDevToolsEnabled = true;
-                _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
-                _webView.CoreWebView2.Settings.IsZoomControlEnabled = true;
-                _webView.CoreWebView2.HistoryChanged += (_, _) => UpdateNavigationButtons();
-                _webView.CoreWebView2.NavigationCompleted += (_, _) =>
-                {
-                    if (_webView.Source is not null)
-                        _addressBar.Text = _webView.Source.ToString();
-                    UpdateNavigationButtons();
-                };
-                Navigate(_homeUrl);
-            }
+                if (_webView.Source is not null)
+                    _addressBar.Text = _webView.Source.ToString();
+                UpdateNavigationButtons();
+            };
+            Navigate(_homeUrl);
         };
     }
 
@@ -120,9 +124,7 @@ public sealed class BrowserPane : Grid
         _addressBar.Text = normalized;
         _homeUrl = normalized;
         UrlChanged?.Invoke(normalized);
-
-        if (_webView.CoreWebView2 is not null)
-            _webView.CoreWebView2.Navigate(normalized);
+        _webView.CoreWebView2?.Navigate(normalized);
     }
 
     private void UpdateNavigationButtons()
