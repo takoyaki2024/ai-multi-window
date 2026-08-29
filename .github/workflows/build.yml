@@ -19,7 +19,7 @@ jobs:
           dotnet-version: '8.0.x'
 
       - name: Restore
-        run: dotnet restore
+        run: dotnet restore -r win-x64
 
       - name: Build
         run: dotnet build -c Release --no-restore
