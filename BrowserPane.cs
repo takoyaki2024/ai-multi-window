@@ -1,4 +1,5 @@
 using Microsoft.Web.WebView2.Wpf;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -11,6 +12,10 @@ public sealed class BrowserPane : Grid
     private readonly WebView2 _webView;
     private readonly Button _backButton;
     private readonly Button _forwardButton;
+    private readonly TextBox _promptBox;
+    private readonly Button _sendButton;
+    private readonly Button _copyAnswerButton;
+    private readonly TextBlock _aiStatus;
     private string _homeUrl;
 
     public event Action<string>? UrlChanged;
@@ -19,6 +24,7 @@ public sealed class BrowserPane : Grid
     {
         _homeUrl = NormalizeUrl(initialUrl);
         Background = System.Windows.Media.Brushes.White;
+        RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -48,17 +54,85 @@ public sealed class BrowserPane : Grid
         AddToToolbar(toolbar, homeButton, 3);
         Grid.SetColumn(_addressBar, 4);
         toolbar.Children.Add(_addressBar);
-
         Children.Add(toolbar);
 
+        var aiBar = new Grid
+        {
+            Margin = new Thickness(6, 0, 6, 6)
+        };
+        aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        _promptBox = new TextBox
+        {
+            MinWidth = 120,
+            MinHeight = 34,
+            MaxHeight = 96,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Padding = new Thickness(8, 5, 8, 5),
+            ToolTip = "このペインのAIへ送るメッセージ。Ctrl+Enterでも送信できます。"
+        };
+        _sendButton = new Button
+        {
+            Content = "送信",
+            MinWidth = 62,
+            Height = 34,
+            Margin = new Thickness(6, 0, 0, 0),
+            Padding = new Thickness(10, 0, 10, 0),
+            ToolTip = "表示中のAIチャットへ送信"
+        };
+        _copyAnswerButton = new Button
+        {
+            Content = "最新回答コピー",
+            MinWidth = 105,
+            Height = 34,
+            Margin = new Thickness(6, 0, 0, 0),
+            Padding = new Thickness(10, 0, 10, 0),
+            ToolTip = "表示中ページから最新のAI回答を取得してクリップボードへコピー"
+        };
+        _aiStatus = new TextBlock
+        {
+            Text = "待機",
+            Foreground = System.Windows.Media.Brushes.DimGray,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(8, 0, 2, 0),
+            MinWidth = 42
+        };
+
+        Grid.SetColumn(_promptBox, 0);
+        Grid.SetColumn(_sendButton, 1);
+        Grid.SetColumn(_copyAnswerButton, 2);
+        Grid.SetColumn(_aiStatus, 3);
+        aiBar.Children.Add(_promptBox);
+        aiBar.Children.Add(_sendButton);
+        aiBar.Children.Add(_copyAnswerButton);
+        aiBar.Children.Add(_aiStatus);
+        Grid.SetRow(aiBar, 1);
+        Children.Add(aiBar);
+
         _webView = new WebView2();
-        Grid.SetRow(_webView, 1);
+        Grid.SetRow(_webView, 2);
         Children.Add(_webView);
 
         _backButton.Click += (_, _) => { if (_webView.CanGoBack) _webView.GoBack(); };
         _forwardButton.Click += (_, _) => { if (_webView.CanGoForward) _webView.GoForward(); };
         reloadButton.Click += (_, _) => _webView.Reload();
         homeButton.Click += (_, _) => Navigate(_homeUrl);
+        _sendButton.Click += async (_, _) => await SendPromptAsync();
+        _copyAnswerButton.Click += async (_, _) => await CopyLatestAnswerAsync();
+        _promptBox.PreviewKeyDown += async (_, e) =>
+        {
+            if (e.Key == Key.Enter && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+            {
+                e.Handled = true;
+                await SendPromptAsync();
+            }
+        };
+
         _addressBar.KeyDown += (_, e) =>
         {
             if (e.Key == Key.Enter)
@@ -94,6 +168,7 @@ public sealed class BrowserPane : Grid
                 if (_webView.Source is not null)
                     _addressBar.Text = _webView.Source.ToString();
                 UpdateNavigationButtons();
+                _aiStatus.Text = "待機";
             };
             Navigate(_homeUrl);
         };
@@ -116,6 +191,179 @@ public sealed class BrowserPane : Grid
     {
         _addressBar.Focus();
         _addressBar.SelectAll();
+    }
+
+    public void FocusPromptBox() => _promptBox.Focus();
+
+    public async Task<bool> SendMessageAsync(string message)
+    {
+        if (_webView.CoreWebView2 is null || string.IsNullOrWhiteSpace(message))
+            return false;
+
+        var messageJson = JsonSerializer.Serialize(message);
+        var script = $$"""
+            (() => {
+                const message = {{messageJson}};
+                const selectors = [
+                    '#prompt-textarea',
+                    'textarea[placeholder]',
+                    'textarea',
+                    '[contenteditable="true"][role="textbox"]',
+                    '[contenteditable="true"]'
+                ];
+
+                let input = null;
+                for (const selector of selectors) {
+                    const candidates = Array.from(document.querySelectorAll(selector));
+                    input = candidates.find(el => {
+                        const r = el.getBoundingClientRect();
+                        return r.width > 20 && r.height > 10 && !el.disabled;
+                    });
+                    if (input) break;
+                }
+
+                if (!input) return 'ERROR:NO_INPUT';
+                input.focus();
+
+                if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
+                    const proto = input instanceof HTMLTextAreaElement
+                        ? HTMLTextAreaElement.prototype
+                        : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                    if (setter) setter.call(input, message);
+                    else input.value = message;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                } else {
+                    input.textContent = '';
+                    document.execCommand('insertText', false, message);
+                    if (!input.textContent) input.textContent = message;
+                    input.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: message
+                    }));
+                }
+
+                const sendSelectors = [
+                    'button[data-testid="send-button"]',
+                    'button[aria-label*="Send"]',
+                    'button[aria-label*="送信"]',
+                    'button[title*="Send"]',
+                    'button[title*="送信"]'
+                ];
+
+                for (const selector of sendSelectors) {
+                    const button = Array.from(document.querySelectorAll(selector)).find(btn =>
+                        !btn.disabled && btn.getBoundingClientRect().width > 0
+                    );
+                    if (button) {
+                        button.click();
+                        return 'OK:BUTTON';
+                    }
+                }
+
+                input.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                }));
+                input.dispatchEvent(new KeyboardEvent('keyup', {
+                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
+                }));
+                return 'OK:ENTER';
+            })();
+            """;
+
+        try
+        {
+            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script);
+            var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
+            return result.StartsWith("OK:", StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public async Task<string?> GetLatestAnswerAsync()
+    {
+        if (_webView.CoreWebView2 is null)
+            return null;
+
+        const string script = """
+            (() => {
+                const selectors = [
+                    '[data-message-author-role="assistant"]',
+                    '[data-content-source="assistant"]',
+                    'main article'
+                ];
+
+                for (const selector of selectors) {
+                    const items = Array.from(document.querySelectorAll(selector))
+                        .filter(el => el.innerText && el.innerText.trim().length > 0);
+                    if (items.length > 0) return items[items.length - 1].innerText.trim();
+                }
+                return '';
+            })();
+            """;
+
+        try
+        {
+            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script);
+            var text = JsonSerializer.Deserialize<string>(raw);
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task SendPromptAsync()
+    {
+        var message = _promptBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            _aiStatus.Text = "未入力";
+            return;
+        }
+
+        SetAiControlsEnabled(false);
+        _aiStatus.Text = "送信中";
+        var success = await SendMessageAsync(message);
+        if (success)
+        {
+            _promptBox.Clear();
+            _aiStatus.Text = "送信済";
+        }
+        else
+        {
+            _aiStatus.Text = "送信失敗";
+        }
+        SetAiControlsEnabled(true);
+    }
+
+    private async Task CopyLatestAnswerAsync()
+    {
+        SetAiControlsEnabled(false);
+        _aiStatus.Text = "取得中";
+        var answer = await GetLatestAnswerAsync();
+        if (!string.IsNullOrWhiteSpace(answer))
+        {
+            Clipboard.SetText(answer);
+            _aiStatus.Text = "コピー済";
+        }
+        else
+        {
+            _aiStatus.Text = "回答なし";
+        }
+        SetAiControlsEnabled(true);
+    }
+
+    private void SetAiControlsEnabled(bool enabled)
+    {
+        _sendButton.IsEnabled = enabled;
+        _copyAnswerButton.IsEnabled = enabled;
     }
 
     private void Navigate(string value)
