@@ -1,3 +1,4 @@
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using System.Text.Json;
 using System.Windows;
@@ -16,13 +17,20 @@ public sealed class BrowserPane : Grid
     private readonly Button _sendButton;
     private readonly Button _copyAnswerButton;
     private readonly TextBlock _aiStatus;
+    private readonly string _profileFolder;
     private string _homeUrl;
 
     public event Action<string>? UrlChanged;
 
-    public BrowserPane(string initialUrl)
+    public BrowserPane(string initialUrl, int paneIndex)
     {
         _homeUrl = NormalizeUrl(initialUrl);
+        _profileFolder = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AiMultiWindow",
+            "WebViewProfiles",
+            $"pane-{paneIndex + 1}");
+
         Background = System.Windows.Media.Brushes.White;
         RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -93,11 +101,11 @@ public sealed class BrowserPane : Grid
         };
         _aiStatus = new TextBlock
         {
-            Text = "待機",
+            Text = $"P{paneIndex + 1} 待機",
             Foreground = System.Windows.Media.Brushes.DimGray,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 2, 0),
-            MinWidth = 42,
+            MinWidth = 52,
             MaxWidth = 220,
             TextTrimming = TextTrimming.CharacterEllipsis
         };
@@ -148,29 +156,7 @@ public sealed class BrowserPane : Grid
             UrlChanged?.Invoke(normalized);
         };
 
-        Loaded += async (_, _) =>
-        {
-            if (_webView.CoreWebView2 is not null)
-                return;
-
-            await _webView.EnsureCoreWebView2Async();
-            var core = _webView.CoreWebView2;
-            if (core is null)
-                return;
-
-            core.Settings.AreDevToolsEnabled = true;
-            core.Settings.AreDefaultContextMenusEnabled = true;
-            core.Settings.IsZoomControlEnabled = true;
-            core.HistoryChanged += (_, _) => UpdateNavigationButtons();
-            core.NavigationCompleted += (_, _) =>
-            {
-                if (_webView.Source is not null)
-                    _addressBar.Text = _webView.Source.ToString();
-                UpdateNavigationButtons();
-                _aiStatus.Text = "待機";
-            };
-            Navigate(_homeUrl);
-        };
+        Loaded += async (_, _) => await InitializeWebViewAsync();
     }
 
     public string HomeUrl
@@ -187,6 +173,43 @@ public sealed class BrowserPane : Grid
     public void NavigateHome() => Navigate(_homeUrl);
     public void FocusAddressBar() { _addressBar.Focus(); _addressBar.SelectAll(); }
     public void FocusPromptBox() => _promptBox.Focus();
+
+    private async Task InitializeWebViewAsync()
+    {
+        if (_webView.CoreWebView2 is not null)
+            return;
+
+        try
+        {
+            Directory.CreateDirectory(_profileFolder);
+            var environment = await CoreWebView2Environment.CreateAsync(userDataFolder: _profileFolder);
+            await _webView.EnsureCoreWebView2Async(environment);
+            var core = _webView.CoreWebView2;
+            if (core is null)
+            {
+                _aiStatus.Text = "WebView失敗";
+                return;
+            }
+
+            core.Settings.AreDevToolsEnabled = true;
+            core.Settings.AreDefaultContextMenusEnabled = true;
+            core.Settings.IsZoomControlEnabled = true;
+            core.HistoryChanged += (_, _) => UpdateNavigationButtons();
+            core.NavigationCompleted += (_, _) =>
+            {
+                if (_webView.Source is not null)
+                    _addressBar.Text = _webView.Source.ToString();
+                UpdateNavigationButtons();
+                _aiStatus.Text = "待機";
+            };
+            Navigate(_homeUrl);
+        }
+        catch (Exception ex)
+        {
+            _aiStatus.Text = $"WebView失敗: {ex.GetType().Name}";
+            _aiStatus.ToolTip = ex.Message;
+        }
+    }
 
     public async Task<bool> SendMessageAsync(string message)
     {
@@ -214,6 +237,7 @@ public sealed class BrowserPane : Grid
                     if (input) break;
                 }
                 if (!input) return 'ERROR:NO_INPUT';
+
                 input.focus();
                 if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
                     const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -227,6 +251,7 @@ public sealed class BrowserPane : Grid
                     if (!input.textContent) input.textContent = message;
                     input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
                 }
+
                 const sendSelectors = [
                     'button[data-testid="send-button"]',
                     'button[aria-label*="Send"]',
@@ -235,9 +260,11 @@ public sealed class BrowserPane : Grid
                     'button[title*="送信"]'
                 ];
                 for (const selector of sendSelectors) {
-                    const button = Array.from(document.querySelectorAll(selector)).find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0);
+                    const button = Array.from(document.querySelectorAll(selector))
+                        .find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0);
                     if (button) { button.click(); return 'OK:BUTTON'; }
                 }
+
                 input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
                 input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
                 return 'OK:ENTER';
@@ -246,12 +273,16 @@ public sealed class BrowserPane : Grid
 
         try
         {
-            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(8));
+            var raw = await ExecuteScriptWithRetryAsync(script, 8);
+            if (string.IsNullOrWhiteSpace(raw))
+                return false;
             var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
             return result.StartsWith("OK:", StringComparison.Ordinal);
         }
-        catch
+        catch (Exception ex)
         {
+            _aiStatus.Text = $"送信失敗: {ex.GetType().Name}";
+            _aiStatus.ToolTip = ex.Message;
             return false;
         }
     }
@@ -266,32 +297,55 @@ public sealed class BrowserPane : Grid
 
         const string script = """
             (() => {
-                const directSelectors = [
+                const visible = el => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+
+                const candidates = [];
+                const selectors = [
                     '[data-message-author-role="assistant"]',
                     '[data-content-source="assistant"]',
                     '[data-turn="assistant"]',
-                    'article[data-testid*="conversation-turn"]'
+                    'main article[data-testid*="conversation-turn"]'
                 ];
 
-                for (const selector of directSelectors) {
-                    const items = Array.from(document.querySelectorAll(selector))
-                        .filter(el => el.innerText && el.innerText.trim().length > 0);
-                    if (items.length > 0) return items[items.length - 1].innerText.trim();
+                for (const selector of selectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                        if (!visible(el)) continue;
+                        const role = el.getAttribute('data-message-author-role');
+                        if (role && role !== 'assistant') continue;
+                        const text = (el.innerText || '').trim();
+                        if (text.length > 0) candidates.push({ el, text });
+                    }
                 }
 
-                const articles = Array.from(document.querySelectorAll('main article'))
-                    .filter(el => el.innerText && el.innerText.trim().length > 0);
-                if (articles.length > 0) return articles[articles.length - 1].innerText.trim();
+                if (candidates.length === 0) {
+                    const markdown = Array.from(document.querySelectorAll('main .markdown, main [class*="markdown"]'))
+                        .filter(visible)
+                        .map(el => ({ el, text: (el.innerText || '').trim() }))
+                        .filter(x => x.text.length > 0);
+                    if (markdown.length > 0) return markdown[markdown.length - 1].text;
+                    return '';
+                }
 
-                return '';
+                const unique = [];
+                const seen = new Set();
+                for (const item of candidates) {
+                    if (seen.has(item.el)) continue;
+                    seen.add(item.el);
+                    unique.push(item);
+                }
+                return unique[unique.length - 1].text;
             })();
             """;
 
         try
         {
             _aiStatus.Text = "取得中";
-            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(5));
-            if (string.IsNullOrWhiteSpace(raw) || raw == "null" || raw == "undefined")
+            var raw = await ExecuteScriptWithRetryAsync(script, 5);
+            if (string.IsNullOrWhiteSpace(raw) || raw is "null" or "undefined")
             {
                 _aiStatus.Text = "回答なし";
                 return null;
@@ -318,12 +372,35 @@ public sealed class BrowserPane : Grid
         catch (Exception ex)
         {
             var message = ex.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            if (message.Length > 80)
-                message = message[..80] + "…";
+            if (message.Length > 120)
+                message = message[..120] + "…";
             _aiStatus.Text = $"取得失敗: {ex.GetType().Name}";
             _aiStatus.ToolTip = message;
             return null;
         }
+    }
+
+    private async Task<string> ExecuteScriptWithRetryAsync(string script, int timeoutSeconds)
+    {
+        Exception? last = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                if (_webView.CoreWebView2 is null)
+                    throw new InvalidOperationException("WebView2 is not initialized.");
+
+                return await _webView.CoreWebView2.ExecuteScriptAsync(script)
+                    .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds));
+            }
+            catch (Exception ex) when (attempt < 2)
+            {
+                last = ex;
+                await Task.Delay(250 * (attempt + 1));
+            }
+        }
+
+        throw last ?? new InvalidOperationException("Script execution failed.");
     }
 
     private async Task SendPromptAsync()
@@ -334,7 +411,7 @@ public sealed class BrowserPane : Grid
         _aiStatus.Text = "送信中";
         var success = await SendMessageAsync(message);
         if (success) { _promptBox.Clear(); _aiStatus.Text = "送信済"; }
-        else _aiStatus.Text = "送信失敗";
+        else if (!_aiStatus.Text.StartsWith("送信失敗", StringComparison.Ordinal)) _aiStatus.Text = "送信失敗";
         SetAiControlsEnabled(true);
     }
 
@@ -342,7 +419,19 @@ public sealed class BrowserPane : Grid
     {
         SetAiControlsEnabled(false);
         var answer = await GetLatestAnswerAsync();
-        if (!string.IsNullOrWhiteSpace(answer)) Clipboard.SetText(answer);
+        if (!string.IsNullOrWhiteSpace(answer))
+        {
+            try
+            {
+                Clipboard.SetText(answer);
+                _aiStatus.Text = "コピー済";
+            }
+            catch (Exception ex)
+            {
+                _aiStatus.Text = $"コピー失敗: {ex.GetType().Name}";
+                _aiStatus.ToolTip = ex.Message;
+            }
+        }
         SetAiControlsEnabled(true);
     }
 
