@@ -10,6 +10,7 @@ public partial class MainWindow : Window
 {
     private readonly AppSettings _settings;
     private readonly BrowserPane[] _panes;
+    private readonly OrchestrationEngine _orchestrator;
     private int _layoutCount;
     private bool _isFullscreen;
     private WindowStyle _previousWindowStyle;
@@ -20,6 +21,7 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _settings = AppSettings.Load();
+        _orchestrator = OrchestrationEngine.Load();
         _layoutCount = _settings.LayoutCount;
         _panes = new BrowserPane[4];
 
@@ -34,7 +36,12 @@ public partial class MainWindow : Window
             };
         }
 
-        Loaded += (_, _) => ApplyLayout(_layoutCount);
+        Loaded += (_, _) =>
+        {
+            ApplyLayout(_layoutCount);
+            TaskTextBox.Text = _orchestrator.TaskText;
+            UpdateOrchestratorUi();
+        };
         Closing += MainWindow_Closing;
     }
 
@@ -150,6 +157,147 @@ public partial class MainWindow : Window
         return grid;
     }
 
+    private async void StartOrchestration_Click(object sender, RoutedEventArgs e)
+    {
+        var task = TaskTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(task))
+        {
+            StatusText.Text = "依頼を入力してください";
+            return;
+        }
+
+        _orchestrator.Start(task);
+        ApplyLayout(4);
+        UpdateOrchestratorUi();
+        await SendCurrentStepAsync();
+    }
+
+    private void StopOrchestration_Click(object sender, RoutedEventArgs e)
+    {
+        if (_orchestrator.State == WorkflowState.Running)
+            _orchestrator.Stop("ユーザーが停止しました");
+        UpdateOrchestratorUi();
+        StatusText.Text = "司令塔を停止しました";
+    }
+
+    private void ResetOrchestration_Click(object sender, RoutedEventArgs e)
+    {
+        _orchestrator.Reset();
+        TaskTextBox.Clear();
+        UpdateOrchestratorUi();
+        StatusText.Text = "司令塔をリセットしました";
+    }
+
+    private async void CaptureAndAdvance_Click(object sender, RoutedEventArgs e)
+    {
+        if (_orchestrator.State != WorkflowState.Running)
+        {
+            StatusText.Text = "実行中のタスクがありません";
+            return;
+        }
+
+        var role = _orchestrator.CurrentRole;
+        var pane = _panes[(int)role];
+        StatusText.Text = $"{role} の回答を取得中...";
+        var answer = await pane.GetLatestAnswerAsync();
+        if (string.IsNullOrWhiteSpace(answer))
+        {
+            StatusText.Text = $"{role} の回答を取得できませんでした";
+            return;
+        }
+
+        var advanced = _orchestrator.RecordAnswer(answer);
+        UpdateOrchestratorUi();
+
+        if (_orchestrator.State == WorkflowState.Success)
+        {
+            StatusText.Text = "レビューPASS — ワークフロー完了";
+            return;
+        }
+
+        if (_orchestrator.State == WorkflowState.Stopped)
+        {
+            StatusText.Text = _orchestrator.StopReason;
+            return;
+        }
+
+        if (!advanced)
+        {
+            StatusText.Text = "回答を処理できなかったため停止しました";
+            return;
+        }
+
+        await SendCurrentStepAsync();
+    }
+
+    private async void ResendCurrent_Click(object sender, RoutedEventArgs e)
+    {
+        if (_orchestrator.State != WorkflowState.Running)
+        {
+            StatusText.Text = "再送できる実行中タスクがありません";
+            return;
+        }
+
+        await SendCurrentStepAsync();
+    }
+
+    private void ChatGptMode_Click(object sender, RoutedEventArgs e)
+    {
+        const string chatGptUrl = "https://chatgpt.com/";
+        for (var i = 0; i < _panes.Length; i++)
+        {
+            _panes[i].HomeUrl = chatGptUrl;
+            _panes[i].NavigateHome();
+            _settings.Urls[i] = chatGptUrl;
+        }
+        _settings.Save();
+        ApplyLayout(4);
+        StatusText.Text = "4ペインをChatGPTに設定しました";
+    }
+
+    private async Task SendCurrentStepAsync()
+    {
+        if (_orchestrator.State != WorkflowState.Running)
+            return;
+
+        if (!_orchestrator.MarkPromptSent())
+        {
+            UpdateOrchestratorUi();
+            StatusText.Text = _orchestrator.StopReason;
+            return;
+        }
+
+        var role = _orchestrator.CurrentRole;
+        var pane = _panes[(int)role];
+        var prompt = _orchestrator.BuildCurrentPrompt();
+        StatusText.Text = $"{role} へ送信中...";
+        var sent = await pane.SendMessageAsync(prompt);
+
+        if (!sent)
+        {
+            StatusText.Text = $"{role} への自動送信に失敗しました。各ペインの入力欄から手動送信できます。";
+        }
+        else
+        {
+            StatusText.Text = $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。";
+        }
+
+        UpdateOrchestratorUi();
+    }
+
+    private void UpdateOrchestratorUi()
+    {
+        WorkflowStateText.Text = $"State: {_orchestrator.State}";
+        CurrentRoleText.Text = $"Role: {_orchestrator.CurrentRole}";
+        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls}";
+        FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}";
+        StopReasonText.Text = _orchestrator.StopReason;
+
+        var running = _orchestrator.State == WorkflowState.Running;
+        CaptureNextButton.IsEnabled = running;
+        ResendButton.IsEnabled = running;
+    }
+
     private static Grid CreateContainer() => new()
     {
         Background = Brushes.Black,
@@ -258,5 +406,6 @@ public partial class MainWindow : Window
         for (var i = 0; i < _panes.Length; i++)
             _settings.Urls[i] = _panes[i].HomeUrl;
         _settings.Save();
+        _orchestrator.Save();
     }
 }
