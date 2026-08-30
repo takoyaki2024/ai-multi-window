@@ -243,7 +243,7 @@ public sealed class OrchestrationEngine
 
     private static bool ReviewerRequestsFix(string answer)
     {
-        var firstLine = answer.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+        var firstLine = answer.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault()?.Trim() ?? string.Empty;
         return firstLine.StartsWith("FAIL", StringComparison.OrdinalIgnoreCase);
     }
