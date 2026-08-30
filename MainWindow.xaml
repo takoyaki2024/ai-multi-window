@@ -58,6 +58,13 @@
                              VerticalScrollBarVisibility="Auto"
                              ToolTip="ここに1回だけ依頼を書きます"/>
 
+                    <TextBlock Text="Workspace" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                    <TextBox x:Name="WorkspaceTextBox"
+                             Margin="0,0,0,10"
+                             Padding="8"
+                             TextWrapping="NoWrap"
+                             ToolTip="Coderが変更してdotnet buildを実行するローカルフォルダ"/>
+
                     <WrapPanel Margin="0,0,0,8">
                         <Button Content="開始" Width="68" Height="34" Margin="0,0,6,6" Click="StartOrchestration_Click"/>
                         <Button Content="停止" Width="68" Height="34" Margin="0,0,6,6" Click="StopOrchestration_Click"/>
@@ -96,7 +103,7 @@
                     <TextBlock Margin="0,14,0,0"
                                Foreground="#6B7280"
                                TextWrapping="Wrap"
-                               Text="自動ポーリングは行いません。回答が完成したら「回答取得 → 次工程」を押してください。同一回答・AI呼び出し上限・修正上限で停止します。"/>
+                               Text="自動ポーリングは行いません。回答が完成したら「回答取得 → 次工程」を押してください。Coder回答取得時はWorkspaceへ変更を適用し、dotnet build結果をReviewerへ渡します。"/>
                 </StackPanel>
             </ScrollViewer>
         </Border>
