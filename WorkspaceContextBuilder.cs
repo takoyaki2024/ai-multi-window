@@ -136,6 +136,19 @@ public static class WorkspaceContextBuilder
         return output.ToString();
     }
 
+    public static IReadOnlySet<string> GetCompleteFilePaths(string coderContext)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(coderContext)) return paths;
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                     coderContext,
+                     @"(?m)^===== COMPLETE FILE: (?<path>[^\r\n]+) =====\r?$"))
+        {
+            paths.Add(match.Groups["path"].Value.Trim().Replace('\\', '/'));
+        }
+        return paths;
+    }
+
     private static bool PlannerMentionsFile(string root, FileInfo file, string plannerAnswer)
     {
         var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');

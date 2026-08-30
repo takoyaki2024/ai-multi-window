@@ -45,7 +45,8 @@ public static class WorkspaceExecutor
     public static async Task<WorkspaceExecutionResult> ApplyCoderResponseAsync(
         string workspaceRoot,
         string coderResponse,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<string>? completeContextPaths = null)
     {
         if (string.IsNullOrWhiteSpace(workspaceRoot) || !Directory.Exists(workspaceRoot))
             return new(false, "Workspaceが存在しません。", string.Empty);
@@ -62,7 +63,7 @@ public static class WorkspaceExecutor
         if (changes.Count > MaxChangeBlocks)
             return new(false, $"変更ブロック数が上限 {MaxChangeBlocks} を超えています。", string.Empty);
 
-        var validationError = ValidateChangeSet(root, changes);
+        var validationError = ValidateChangeSet(root, changes, completeContextPaths);
         if (validationError is not null)
             return new(false, validationError, string.Empty);
 
@@ -681,7 +682,10 @@ public static class WorkspaceExecutor
             || relative.StartsWith(TransactionDirectoryName + "/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string? ValidateChangeSet(string root, IReadOnlyList<FileChange> changes)
+    private static string? ValidateChangeSet(
+        string root,
+        IReadOnlyList<FileChange> changes,
+        IReadOnlySet<string>? completeContextPaths)
     {
         var distinctFiles = changes
             .Select(change => change.Path.Replace('\\', '/'))
@@ -720,6 +724,13 @@ public static class WorkspaceExecutor
             if ((change.Action == "MODIFY" || change.Action == "PATCH") &&
                 !File.Exists(target))
                 return $"{change.Action}対象が存在しません: {change.Path}";
+
+            if (change.Action == "MODIFY")
+            {
+                var relative = Path.GetRelativePath(root, target).Replace('\\', '/');
+                if (completeContextPaths is null || !completeContextPaths.Contains(relative))
+                    return $"MODIFYを拒否しました。Coderへ完全なCOMPLETE FILEが提供されたことを確認できません: {change.Path}";
+            }
 
             if (change.Action == "PATCH" && string.IsNullOrEmpty(change.Search))
                 return $"PATCHのSEARCHが空です: {change.Path}";

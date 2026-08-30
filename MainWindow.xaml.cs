@@ -191,7 +191,11 @@ public partial class MainWindow : Window
                 var workspace = WorkspaceTextBox.Text.Trim();
                 StatusText.Text = "Coder変更をWorkspaceへ適用してビルド中...";
                 BeginActivity(role, "Workspace適用 / build / test", 120);
-                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(workspace, answer);
+                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(
+                    workspace,
+                    answer,
+                    cancellationToken,
+                    WorkspaceContextBuilder.GetCompleteFilePaths(_orchestrator.CoderWorkspaceContext));
                 var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
                 var executionSucceeded = execution.Success;
                 if (executionSucceeded)
@@ -321,7 +325,11 @@ public partial class MainWindow : Window
             {
                 StatusText.Text = "Coder変更を適用し、build/testを実行中...";
                 BeginActivity(role, "Workspace適用 / build / test", 120);
-                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
+                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(
+                    WorkspaceTextBox.Text.Trim(),
+                    answer,
+                    cancellationToken,
+                    WorkspaceContextBuilder.GetCompleteFilePaths(_orchestrator.CoderWorkspaceContext));
                 var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
                 var executionSucceeded = execution.Success;
                 if (executionSucceeded)

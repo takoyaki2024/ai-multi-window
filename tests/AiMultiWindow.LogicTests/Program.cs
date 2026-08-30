@@ -12,7 +12,11 @@ var tests = new (string Name, Func<Task> Run)[]
     ("no-safe-match-duplicate-escalates-repair", NoSafeMatchDuplicateEscalatesRepair),
     ("failed-patch-repairs-through-reviewer", FailedPatchRepairsThroughReviewer),
     ("safe-patch-hint-produces-valid-patch", SafePatchHintProducesValidPatch),
-    ("invalid-output-format-repairs-to-valid-patch", InvalidOutputFormatRepairsToValidPatch)
+    ("invalid-output-format-repairs-to-valid-patch", InvalidOutputFormatRepairsToValidPatch),
+    ("modify-requires-complete-context", ModifyRequiresCompleteContext),
+    ("failed-create-rolls-back-new-file", FailedCreateRollsBackNewFile),
+    ("valid-create-builds-and-commits", ValidCreateBuildsAndCommits),
+    ("workspace-traversal-is-rejected", WorkspaceTraversalIsRejected)
 };
 
 var failures = 0;
@@ -71,6 +75,8 @@ static Task ReviewerFailRepairsLastStep()
     Assert(e.CurrentRole == AgentRole.Reviewer && e.FixAttempts == 1, "repair returns to reviewer without resetting limit");
     Assert(e.CoderStepAnswers.Count == 2 && e.CoderStepAnswers[1].Contains("repaired"), "repair replaces last step answer");
     Assert(e.SuccessfulExecutionResults.Count == 2 && e.SuccessfulExecutionResults[1] == "two repaired", "repair replaces last verification");
+    Assert(e.RecordAnswer("PASS\nRepair verified"), "reviewer PASS accepted after repair");
+    Assert(e.State == WorkflowState.Success, "reviewer repair loop terminates in success");
     return Task.CompletedTask;
 }
 
@@ -276,6 +282,92 @@ static async Task InvalidOutputFormatRepairsToValidPatch()
     }
 }
 
+static async Task ModifyRequiresCompleteContext()
+{
+    var root = TempRoot();
+    try
+    {
+        const string original = "public static class Value { public const int Number = 1; }";
+        const string modified = "public static class Value { public const int Number = 2; }";
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        await File.WriteAllTextAsync(Path.Combine(root, "Value.cs"), original);
+        var response = Modify("Value.cs", modified);
+
+        var rejected = await WorkspaceExecutor.ApplyCoderResponseAsync(root, response);
+        Assert(!rejected.Success && rejected.Summary.Contains("COMPLETE FILE"), "MODIFY without complete context is rejected");
+        Assert(await File.ReadAllTextAsync(Path.Combine(root, "Value.cs")) == original, "rejected MODIFY does not write");
+
+        var context = await WorkspaceContextBuilder.BuildCoderAsync(root, "FILES: Value.cs");
+        var completePaths = WorkspaceContextBuilder.GetCompleteFilePaths(context);
+        Assert(completePaths.Contains("Value.cs"), "complete context authorization is derived from generated context");
+        var accepted = await WorkspaceExecutor.ApplyCoderResponseAsync(root, response, default, completePaths);
+        Assert(accepted.Success, "MODIFY with verified complete context passes build/test");
+        Assert(!WorkspaceExecutor.CommitPending().Contains("FAILED", StringComparison.Ordinal), "verified MODIFY commits");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
+static async Task FailedCreateRollsBackNewFile()
+{
+    var root = TempRoot();
+    try
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        var createdPath = Path.Combine(root, "Broken.cs");
+        var failed = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Create("Broken.cs", "public class Broken { this is invalid; }"));
+        Assert(!failed.Success, "CREATE with build failure is rejected");
+        Assert(!File.Exists(createdPath), "failed CREATE is removed by current-step rollback");
+        Assert(!WorkspaceExecutor.HasPendingChanges, "failed CREATE leaves no pending transaction");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
+static async Task ValidCreateBuildsAndCommits()
+{
+    var root = TempRoot();
+    try
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        var createdPath = Path.Combine(root, "Added.cs");
+        var created = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Create("Added.cs", "public static class Added { public const int Value = 1; }"));
+        Assert(created.Success && File.Exists(createdPath), "valid CREATE passes local build/test");
+        Assert(!WorkspaceExecutor.CommitPending().Contains("FAILED", StringComparison.Ordinal), "valid CREATE commits");
+        Assert(await File.ReadAllTextAsync(createdPath) == "public static class Added { public const int Value = 1; }", "committed CREATE content is exact");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
+static async Task WorkspaceTraversalIsRejected()
+{
+    var root = TempRoot();
+    var outsideName = $"escape-{Guid.NewGuid():N}.cs";
+    var outsidePath = Path.GetFullPath(Path.Combine(root, "..", outsideName));
+    try
+    {
+        var rejected = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Create($"../{outsideName}", "public class Escape { }"));
+        Assert(!rejected.Success && rejected.Summary.Contains("不正または保護対象"), "parent traversal is rejected during validation");
+        Assert(!File.Exists(outsidePath), "workspace traversal performs no write");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        if (File.Exists(outsidePath)) File.Delete(outsidePath);
+        Directory.Delete(root, true);
+    }
+}
+
 static OrchestrationEngine AtCoderWithTwoSteps()
 {
     var e = new OrchestrationEngine();
@@ -306,6 +398,8 @@ static void Accept(OrchestrationEngine e, string answer)
 }
 
 static string Patch(string path, string search, string replace) => $"FILE: {path}\nACTION: PATCH\n<<<SEARCH\n{search}\nSEARCH\n<<<REPLACE\n{replace}\nREPLACE\nCODER_DONE";
+static string Modify(string path, string content) => $"FILE: {path}\nACTION: MODIFY\n<<<CONTENT\n{content}\nCONTENT\nCODER_DONE";
+static string Create(string path, string content) => $"FILE: {path}\nACTION: CREATE\n<<<CONTENT\n{content}\nCONTENT\nCODER_DONE";
 static string TempRoot()
 {
     var path = Path.Combine(Path.GetTempPath(), "AiMultiWindowTests", Guid.NewGuid().ToString("N"));

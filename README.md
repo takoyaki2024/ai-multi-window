@@ -63,6 +63,14 @@ dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile
 
 `bin\Release\net8.0-windows\win-x64\publish\AiMultiWindow.exe`
 
+## V1検証
+
+Release build、ワークフロー状態遷移、PATCH/CREATE/MODIFY、Step単位rollback、Coder repairの回帰テストをまとめて実行できます。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/verify-v1.ps1
+```
+
 ## 初期URL
 
 1. ChatGPT: https://chatgpt.com/
