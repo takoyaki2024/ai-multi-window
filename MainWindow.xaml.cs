@@ -28,7 +28,7 @@ public partial class MainWindow : Window
         for (var i = 0; i < 4; i++)
         {
             var index = i;
-            _panes[i] = new BrowserPane(_settings.Urls[i]);
+            _panes[i] = new BrowserPane(_settings.Urls[i], i);
             _panes[i].UrlChanged += url =>
             {
                 _settings.Urls[index] = url;
@@ -198,36 +198,47 @@ public partial class MainWindow : Window
 
         var role = _orchestrator.CurrentRole;
         var pane = _panes[(int)role];
+        CaptureNextButton.IsEnabled = false;
+        CaptureNextButton.Content = "回答取得中...";
         StatusText.Text = $"{role} の回答を取得中...";
-        var answer = await pane.GetLatestAnswerAsync();
-        if (string.IsNullOrWhiteSpace(answer))
+
+        try
         {
-            StatusText.Text = $"{role} の回答を取得できませんでした";
-            return;
+            var answer = await pane.GetLatestAnswerAsync();
+            if (string.IsNullOrWhiteSpace(answer))
+            {
+                StatusText.Text = $"{role} の回答を取得できませんでした";
+                return;
+            }
+
+            var advanced = _orchestrator.RecordAnswer(answer);
+            UpdateOrchestratorUi();
+
+            if (_orchestrator.State == WorkflowState.Success)
+            {
+                StatusText.Text = "レビューPASS — ワークフロー完了";
+                return;
+            }
+
+            if (_orchestrator.State == WorkflowState.Stopped)
+            {
+                StatusText.Text = _orchestrator.StopReason;
+                return;
+            }
+
+            if (!advanced)
+            {
+                StatusText.Text = "回答を処理できなかったため停止しました";
+                return;
+            }
+
+            await SendCurrentStepAsync();
         }
-
-        var advanced = _orchestrator.RecordAnswer(answer);
-        UpdateOrchestratorUi();
-
-        if (_orchestrator.State == WorkflowState.Success)
+        finally
         {
-            StatusText.Text = "レビューPASS — ワークフロー完了";
-            return;
+            CaptureNextButton.Content = "回答取得 → 次工程";
+            CaptureNextButton.IsEnabled = _orchestrator.State == WorkflowState.Running;
         }
-
-        if (_orchestrator.State == WorkflowState.Stopped)
-        {
-            StatusText.Text = _orchestrator.StopReason;
-            return;
-        }
-
-        if (!advanced)
-        {
-            StatusText.Text = "回答を処理できなかったため停止しました";
-            return;
-        }
-
-        await SendCurrentStepAsync();
     }
 
     private async void ResendCurrent_Click(object sender, RoutedEventArgs e)
@@ -252,7 +263,7 @@ public partial class MainWindow : Window
         }
         _settings.Save();
         ApplyLayout(4);
-        StatusText.Text = "4ペインをChatGPTに設定しました";
+        StatusText.Text = "4ペインを独立ChatGPTプロファイルに設定しました";
     }
 
     private async Task SendCurrentStepAsync()
