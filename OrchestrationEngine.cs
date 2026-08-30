@@ -231,10 +231,25 @@ public sealed class OrchestrationEngine
 
         AgentRole.Coder => $"""
             あなたはCoderです。計画と実際のWORKSPACE_CONTEXTに従い、workspace内へ適用できる本物の変更を出力してください。
-            CREATE/MODIFYのみ使用可能です。.git/bin/objやworkspace外は変更禁止です。
-            既存アプリのUIや動作を変更する依頼では、WORKSPACE_CONTEXTから該当する既存ソースを特定してMODIFYしてください。
+            使用可能ACTIONは CREATE / PATCH / MODIFY です。.git/bin/objやworkspace外は変更禁止です。
+            既存ファイルの小規模変更では必ず PATCH を第一選択にしてください。MODIFYによるファイル全文再生成は、PATCHでは安全に表現できない場合だけ使用してください。
             無関係なtxt、説明用ファイル、ダミーファイルを作って実装の代わりにしてはいけません。
-            変更する各ファイルを必ず次の厳密な形式で、ファイル全文として出力してください。
+
+            既存ファイルを部分変更する場合は次の厳密なPATCH形式を使ってください。
+
+            FILE: relative/path.ext
+            ACTION: PATCH
+            <<<SEARCH
+            既存ファイル内に完全一致で1回だけ存在する、十分に具体的な元の文字列
+            SEARCH
+            <<<REPLACE
+            置換後の文字列
+            REPLACE
+
+            SEARCHはWORKSPACE_CONTEXTに実際に存在する文字列をそのまま使い、完全一致1件になるだけの周辺行を含めてください。
+            SEARCHを推測・省略・整形してはいけません。PATCHは一致数が0件または複数件なら安全のため自動拒否されます。
+
+            新規ファイル、またはPATCHで安全に表現できない場合だけ次を使えます。
 
             FILE: relative/path.ext
             ACTION: CREATE または MODIFY
@@ -242,12 +257,10 @@ public sealed class OrchestrationEngine
             ファイル全文
             CONTENT
 
-            重要: <<<CONTENT と CONTENT の間にはファイルそのものだけを書いてください。
-            ```xml や ```csharp などのMarkdownコードフェンス、説明文、ファイル名見出しを混ぜてはいけません。
-            MODIFYでは提示された COMPLETE FILE を基準に、必要箇所以外を一切書き換えないでください。無関係な整形、改行変更、並べ替え、リファクタリング、既存処理の再生成は禁止です。
+            重要: 各ブロック内にはファイル内容だけを書き、Markdownコードフェンスや説明文を混ぜないでください。
             Plannerが複数の変更対象ファイルを指定し、それらがWORKSPACE_CONTEXTに完全な内容で存在する場合は、計画どおり各対象ファイルを最小差分で変更してください。別ファイルの動的生成で計画を迂回しないでください。
-            XAML/XMLは単一の正しいルート要素で閉じ、終了タグより後ろに余分な文字を置いてはいけません。
-            ローカルbuild/testが失敗した場合は LOCAL_EXECUTION_FEEDBACK を最優先で読み、同じ失敗を繰り返さず修正してください。
+            XAML/XMLでは終了ルートタグの後ろにCODER_DONEや説明文を絶対に入れないでください。CODER_DONEはすべてのFILEブロックの外側、回答の最後の独立行にだけ置いてください。
+            ローカルbuild/testが失敗した場合は LOCAL_EXECUTION_FEEDBACK を最優先で読み、同じ失敗を繰り返さず、可能なら全文MODIFYからPATCHへ切り替えて修正してください。
             Reviewerから修正指摘がある場合は REVIEW_FEEDBACK を最優先で反映し、指摘された無関係な差分を元に戻してください。
             説明だけで終わらず、実装が必要なら必ず上記ブロックを出してください。
             最後に CODER_DONE と書いてください。
