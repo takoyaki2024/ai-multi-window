@@ -4,7 +4,7 @@ namespace AiMultiWindow;
 
 public static class WorkspaceContextBuilder
 {
-    private const int MaxContextChars = 32_000;
+    private const int MaxContextChars = 14_000;
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
     private const int MaxCoderFiles = 12;
@@ -59,8 +59,9 @@ public static class WorkspaceContextBuilder
             }
 
             var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-            // Planner receives small project/configuration files and a tree. Large source files are
-            // deliberately omitted instead of truncated so no partial file can be mistaken for a full file.
+            // Planner receives the project tree plus only enough representative source to choose files.
+            // Large source files are deliberately omitted instead of truncated so partial content is
+            // never mistaken for a complete file. Coder receives complete selected files separately.
             if (content.Length > MaxSingleFileChars)
             {
                 output.AppendLine($"OMITTED_LARGE_FILE: {relative} ({content.Length} chars)");
@@ -72,7 +73,7 @@ public static class WorkspaceContextBuilder
             if (block.Length > remaining)
             {
                 output.AppendLine($"OMITTED_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial.");
-                break;
+                continue;
             }
 
             output.Append(block);
