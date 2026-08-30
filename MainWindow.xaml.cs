@@ -222,7 +222,7 @@ public partial class MainWindow : Window
         _settings.Save();
     }
 
-    private static void DetachFromParent(UIElement element)
+    private static void DetachFromParent(FrameworkElement element)
     {
         if (element.Parent is Panel panel)
             panel.Children.Remove(element);
