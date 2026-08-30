@@ -5,13 +5,12 @@ namespace AiMultiWindow;
 
 public sealed class AppSettings
 {
-    public int LayoutCount { get; set; } = 4;
+    public int LayoutCount { get; set; } = 3;
     public string[] Urls { get; set; } =
     [
         "https://chatgpt.com/",
         "https://gemini.google.com/",
-        "https://claude.ai/",
-        "https://www.google.com/"
+        "https://claude.ai/"
     ];
 
     private static string SettingsDirectory => Path.Combine(
@@ -29,19 +28,16 @@ public sealed class AppSettings
 
             var json = File.ReadAllText(SettingsPath);
             var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
-            settings.LayoutCount = Math.Clamp(settings.LayoutCount, 1, 4);
+            settings.LayoutCount = 3;
 
-            if (settings.Urls is null || settings.Urls.Length != 4)
-            {
-                var defaults = new AppSettings().Urls;
-                var merged = new string[4];
-                for (var i = 0; i < 4; i++)
-                    merged[i] = settings.Urls is not null && i < settings.Urls.Length && !string.IsNullOrWhiteSpace(settings.Urls[i])
-                        ? settings.Urls[i]
-                        : defaults[i];
-                settings.Urls = merged;
-            }
+            var defaults = new AppSettings().Urls;
+            var merged = new string[3];
+            for (var i = 0; i < merged.Length; i++)
+                merged[i] = settings.Urls is not null && i < settings.Urls.Length && !string.IsNullOrWhiteSpace(settings.Urls[i])
+                    ? settings.Urls[i]
+                    : defaults[i];
 
+            settings.Urls = merged;
             return settings;
         }
         catch
