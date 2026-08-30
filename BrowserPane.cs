@@ -81,6 +81,7 @@ public sealed class BrowserPane : Grid
             Padding = new Thickness(8, 5, 8, 5),
             ToolTip = "このペインのAIへ送るメッセージ。Ctrl+Enterでも送信できます。"
         };
+
         _sendButton = new Button
         {
             Content = "送信",
@@ -90,6 +91,7 @@ public sealed class BrowserPane : Grid
             Padding = new Thickness(10, 0, 10, 0),
             ToolTip = "表示中のAIチャットへ送信"
         };
+
         _copyAnswerButton = new Button
         {
             Content = "最新回答コピー",
@@ -99,6 +101,7 @@ public sealed class BrowserPane : Grid
             Padding = new Thickness(10, 0, 10, 0),
             ToolTip = "表示中ページから最新のAI回答を取得してクリップボードへコピー"
         };
+
         _aiStatus = new TextBlock
         {
             Text = $"P{paneIndex + 1} 待機",
@@ -148,6 +151,7 @@ public sealed class BrowserPane : Grid
                 Keyboard.ClearFocus();
             }
         };
+
         _addressBar.LostKeyboardFocus += (_, _) =>
         {
             var normalized = NormalizeUrl(_addressBar.Text);
@@ -228,10 +232,10 @@ public sealed class BrowserPane : Grid
                     '[contenteditable="true"][role="textbox"]',
                     '[contenteditable="true"]'
                 ];
+
                 let input = null;
                 for (const selector of selectors) {
-                    const candidates = Array.from(document.querySelectorAll(selector));
-                    input = candidates.find(el => {
+                    input = Array.from(document.querySelectorAll(selector)).find(el => {
                         const r = el.getBoundingClientRect();
                         return r.width > 20 && r.height > 10 && !el.disabled;
                     });
@@ -251,32 +255,89 @@ public sealed class BrowserPane : Grid
                     input.focus();
                     document.execCommand('insertText', false, message);
                     if (!(input.innerText || input.textContent || '').trim()) input.textContent = message;
-                    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
+                    input.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        composed: true,
+                        inputType: 'insertText',
+                        data: message
+                    }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
                 return 'OK:FILLED';
             })();
             """;
 
-        const string sendScript = """
+        const string clickSendScript = """
             (() => {
+                const visible = el => {
+                    if (!el) return false;
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                };
+                const input = document.querySelector('#prompt-textarea')
+                    || document.querySelector('[contenteditable="true"][role="textbox"]')
+                    || document.querySelector('textarea');
+
+                const scopes = [];
+                if (input) {
+                    const form = input.closest('form');
+                    if (form) scopes.push(form);
+                    if (input.parentElement) scopes.push(input.parentElement);
+                }
+                scopes.push(document);
+
                 const selectors = [
                     'button[data-testid="send-button"]',
+                    'button[data-testid*="send"]',
                     'button[aria-label*="Send"]',
+                    'button[aria-label*="send"]',
                     'button[aria-label*="送信"]',
                     'button[title*="Send"]',
-                    'button[title*="送信"]'
+                    'button[title*="send"]',
+                    'button[title*="送信"]',
+                    'button[type="submit"]'
                 ];
-                for (const selector of selectors) {
-                    const button = Array.from(document.querySelectorAll(selector))
-                        .find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0 && btn.getBoundingClientRect().height > 0);
-                    if (button) {
-                        button.focus();
-                        button.click();
-                        return 'OK:SENT';
+
+                for (const scope of scopes) {
+                    for (const selector of selectors) {
+                        const button = Array.from(scope.querySelectorAll(selector))
+                            .find(btn => !btn.disabled && visible(btn));
+                        if (button) {
+                            button.focus();
+                            button.click();
+                            return 'TRIGGER:BUTTON';
+                        }
                     }
                 }
-                return 'WAIT:SEND_BUTTON';
+                return 'NO_SEND_BUTTON';
+            })();
+            """;
+
+        const string enterSendScript = """
+            (() => {
+                const input = document.querySelector('#prompt-textarea')
+                    || document.querySelector('[contenteditable="true"][role="textbox"]')
+                    || document.querySelector('textarea');
+                if (!input) return 'ERROR:NO_INPUT';
+                input.focus();
+                const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
+                input.dispatchEvent(new KeyboardEvent('keydown', options));
+                input.dispatchEvent(new KeyboardEvent('keypress', options));
+                input.dispatchEvent(new KeyboardEvent('keyup', options));
+                return 'TRIGGER:ENTER';
+            })();
+            """;
+
+        const string verifySentScript = """
+            (() => {
+                const input = document.querySelector('#prompt-textarea')
+                    || document.querySelector('[contenteditable="true"][role="textbox"]')
+                    || document.querySelector('textarea');
+                if (!input) return 'OK:INPUT_REMOVED';
+                const text = input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement
+                    ? input.value
+                    : (input.innerText || input.textContent || '');
+                return text.trim().length === 0 ? 'OK:CLEARED' : 'WAIT:STILL_FILLED';
             })();
             """;
 
@@ -290,20 +351,29 @@ public sealed class BrowserPane : Grid
                 return false;
             }
 
-            _aiStatus.Text = "送信待機";
-            for (var attempt = 0; attempt < 12; attempt++)
+            _aiStatus.Text = "送信中";
+            await Task.Delay(350);
+            var clickRaw = await ExecuteScriptWithRetryAsync(clickSendScript, 4);
+            var clickResult = JsonSerializer.Deserialize<string>(clickRaw) ?? string.Empty;
+
+            if (clickResult == "TRIGGER:BUTTON" && await WaitForComposerClearedAsync(verifySentScript))
             {
-                await Task.Delay(attempt == 0 ? 250 : 350);
-                var sendRaw = await ExecuteScriptWithRetryAsync(sendScript, 4);
-                var sendResult = JsonSerializer.Deserialize<string>(sendRaw) ?? string.Empty;
-                if (sendResult == "OK:SENT")
-                {
-                    _aiStatus.Text = "送信済";
-                    return true;
-                }
+                _aiStatus.Text = "送信済";
+                return true;
             }
 
-            _aiStatus.Text = "送信失敗: ボタン待機タイムアウト";
+            // ChatGPT側のDOM変更で送信ボタンを特定できない場合はEnter送信へ切り替える。
+            // Enterを押しただけでは成功扱いにせず、入力欄が実際に空になったことまで確認する。
+            _aiStatus.Text = "Enter送信を試行";
+            var enterRaw = await ExecuteScriptWithRetryAsync(enterSendScript, 4);
+            var enterResult = JsonSerializer.Deserialize<string>(enterRaw) ?? string.Empty;
+            if (enterResult == "TRIGGER:ENTER" && await WaitForComposerClearedAsync(verifySentScript))
+            {
+                _aiStatus.Text = "送信済";
+                return true;
+            }
+
+            _aiStatus.Text = "送信失敗: 入力欄が送信後も残っています";
             return false;
         }
         catch (Exception ex)
@@ -312,6 +382,19 @@ public sealed class BrowserPane : Grid
             _aiStatus.ToolTip = ex.Message;
             return false;
         }
+    }
+
+    private async Task<bool> WaitForComposerClearedAsync(string verifyScript)
+    {
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            await Task.Delay(attempt == 0 ? 250 : 200);
+            var raw = await ExecuteScriptWithRetryAsync(verifyScript, 4);
+            var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
+            if (result.StartsWith("OK:", StringComparison.Ordinal))
+                return true;
+        }
+        return false;
     }
 
     public async Task<string?> GetLatestAnswerAsync()
@@ -433,12 +516,24 @@ public sealed class BrowserPane : Grid
     private async Task SendPromptAsync()
     {
         var message = _promptBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(message)) { _aiStatus.Text = "未入力"; return; }
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            _aiStatus.Text = "未入力";
+            return;
+        }
+
         SetAiControlsEnabled(false);
         _aiStatus.Text = "送信中";
         var success = await SendMessageAsync(message);
-        if (success) { _promptBox.Clear(); _aiStatus.Text = "送信済"; }
-        else if (!_aiStatus.Text.StartsWith("送信失敗", StringComparison.Ordinal)) _aiStatus.Text = "送信失敗";
+        if (success)
+        {
+            _promptBox.Clear();
+            _aiStatus.Text = "送信済";
+        }
+        else if (!_aiStatus.Text.StartsWith("送信失敗", StringComparison.Ordinal))
+        {
+            _aiStatus.Text = "送信失敗";
+        }
         SetAiControlsEnabled(true);
     }
 
