@@ -48,6 +48,8 @@ public sealed class OrchestrationEngine
         AiCalls = 0; SendAttempts = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
         LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
         WorkspaceContext = workspaceContext; CoderWorkspaceContext = string.Empty; Save();
+        WorkflowDiagnostics.Event("1 Manager", "workflow", "WORKFLOW_STARTED", $"taskLength={TaskText.Length}; workspaceContextLength={WorkspaceContext.Length}");
+        WorkflowDiagnostics.Snapshot(this, "WORKFLOW_STARTED");
     }
 
     public void Reset()
@@ -56,11 +58,28 @@ public sealed class OrchestrationEngine
         AiCalls = 0; SendAttempts = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
         LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
         WorkspaceContext = string.Empty; CoderWorkspaceContext = string.Empty; Save();
+        WorkflowDiagnostics.Event("System", "workflow", "WORKFLOW_RESET");
+        WorkflowDiagnostics.Snapshot(this, "WORKFLOW_RESET");
     }
 
-    public void Stop(string reason) { State = WorkflowState.Stopped; StopReason = reason; Save(); }
+    public void Stop(string reason)
+    {
+        State = WorkflowState.Stopped; StopReason = reason; Save();
+        WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "workflow", "WORKFLOW_STOPPED", reason);
+        WorkflowDiagnostics.Snapshot(this, "WORKFLOW_STOPPED", reason);
+    }
+
     public void SetExecutionResult(string value) { ExecutionResult = value; Save(); }
-    public void SetExecutionResult(string value, bool success) { ExecutionResult = value; LastExecutionSucceeded = success; Save(); }
+
+    public void SetExecutionResult(string value, bool success)
+    {
+        ExecutionResult = value;
+        LastExecutionSucceeded = success;
+        Save();
+        WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "local-verification", success ? "LOCAL_VERIFICATION_PASS" : "LOCAL_VERIFICATION_FAIL", Tail(value, 1200));
+        if (!success) WorkflowDiagnostics.Snapshot(this, "LOCAL_VERIFICATION_FAIL", Tail(value, 3500));
+    }
+
     public void SetCoderWorkspaceContext(string value) { CoderWorkspaceContext = value; Save(); }
 
     public bool TryBeginPromptAttempt()
@@ -68,15 +87,31 @@ public sealed class OrchestrationEngine
         if (State != WorkflowState.Running) return false;
         if (AiCalls >= MaxAiCalls) { Stop("AI呼び出し上限に達しました"); return false; }
         if (SendAttempts >= MaxSendAttempts) { Stop("送信試行回数の上限に達しました"); return false; }
-        SendAttempts++; Save(); return true;
+        SendAttempts++;
+        WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "send", "PROMPT_ATTEMPT", $"sendAttempt={SendAttempts}; aiCalls={AiCalls}; fixAttempts={FixAttempts}");
+        Save(); return true;
     }
 
-    public void RecordPromptAccepted() { AiCalls++; Save(); }
+    public void RecordPromptAccepted()
+    {
+        AiCalls++;
+        WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "send", "PROMPT_ACCEPTED", $"aiCalls={AiCalls}; sendAttempts={SendAttempts}");
+        Save();
+    }
 
     public bool RecordAnswer(string answer)
     {
-        if (State != WorkflowState.Running || string.IsNullOrWhiteSpace(answer)) return false;
+        if (State != WorkflowState.Running || string.IsNullOrWhiteSpace(answer))
+        {
+            WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "answer", "ANSWER_REJECTED_EMPTY_OR_NOT_RUNNING", $"state={State}; answerLength={answer?.Length ?? 0}");
+            WorkflowDiagnostics.Snapshot(this, "ANSWER_REJECTED_EMPTY_OR_NOT_RUNNING");
+            return false;
+        }
+
+        var roleBefore = CurrentRole;
         var normalized = answer.Trim();
+        WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_RECEIVED", $"length={normalized.Length}; lastExecutionSucceeded={LastExecutionSucceeded}");
+
         var markerValid = CurrentRole switch
         {
             AgentRole.Manager => ContainsMarker(normalized, "MANAGER_DONE"),
@@ -85,25 +120,44 @@ public sealed class OrchestrationEngine
             AgentRole.Reviewer => ReviewerVerdict(normalized) != ReviewVerdict.Unknown,
             _ => false
         };
-        if (!markerValid) { Stop($"{CurrentRole} の回答形式を確認できませんでした"); return false; }
+        if (!markerValid)
+        {
+            WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_FORMAT_MISMATCH", $"answerLength={normalized.Length}");
+            WorkflowDiagnostics.Snapshot(this, "ANSWER_FORMAT_MISMATCH", $"role={roleBefore}; answerLength={normalized.Length}");
+            Stop($"{CurrentRole} の回答形式を確認できませんでした");
+            return false;
+        }
+
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
         DuplicateCount = hash == LastAnswerHash ? DuplicateCount + 1 : 0;
         LastAnswerHash = hash;
-        if (DuplicateCount >= DuplicateLimit) { Stop("同一回答が繰り返されたため停止しました"); return false; }
+        if (DuplicateCount >= DuplicateLimit)
+        {
+            WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "DUPLICATE_ANSWER_BLOCKED", $"duplicateCount={DuplicateCount}");
+            WorkflowDiagnostics.Snapshot(this, "DUPLICATE_ANSWER_BLOCKED");
+            Stop("同一回答が繰り返されたため停止しました");
+            return false;
+        }
         Answers[CurrentRole] = normalized;
 
         switch (CurrentRole)
         {
             case AgentRole.Manager:
                 CurrentRole = AgentRole.Planner;
+                WorkflowDiagnostics.Event("1 Manager", "transition", "MANAGER_TO_PLANNER");
                 break;
+
             case AgentRole.Planner:
                 CurrentRole = AgentRole.Coder;
+                WorkflowDiagnostics.Event("2 Planner", "transition", "PLANNER_TO_CODER");
                 break;
+
             case AgentRole.Coder:
                 if (!LastExecutionSucceeded)
                 {
                     FixAttempts++;
+                    WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_RETRY_LOCAL_VERIFICATION_FAILED", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; this explains another Coder question instead of Reviewer");
+                    WorkflowDiagnostics.Snapshot(this, "CODER_RETRY_LOCAL_VERIFICATION_FAILED", Tail(ExecutionResult, 3500));
                     if (FixAttempts >= MaxFixAttempts)
                     {
                         Stop("ローカルbuild/test失敗の修正回数上限に達しました");
@@ -114,24 +168,37 @@ public sealed class OrchestrationEngine
                 else
                 {
                     CurrentRole = AgentRole.Reviewer;
+                    WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_TO_REVIEWER", $"coderAnswerLength={normalized.Length}; localVerification=PASS");
+                    WorkflowDiagnostics.Snapshot(this, "CODER_TO_REVIEWER", "Coder answer accepted and local verification passed. Reviewer should be the next role.");
                 }
                 break;
+
             case AgentRole.Reviewer:
                 if (ReviewerVerdict(normalized) == ReviewVerdict.Pass && !LastExecutionSucceeded)
                 {
+                    WorkflowDiagnostics.Snapshot(this, "REVIEWER_PASS_BLOCKED_BY_LOCAL_FAILURE", Tail(ExecutionResult, 3500));
                     Stop("ローカル検証失敗のためReviewer PASSを受理できません");
                     return false;
                 }
                 if (ReviewerVerdict(normalized) == ReviewVerdict.Fail)
                 {
                     FixAttempts++;
+                    WorkflowDiagnostics.Event("4 Reviewer", "transition", "REVIEWER_FAIL_TO_CODER", $"fixAttempt={FixAttempts}/{MaxFixAttempts}");
                     if (FixAttempts >= MaxFixAttempts) { Stop("修正回数の上限に達しました"); return false; }
                     CurrentRole = AgentRole.Coder;
                 }
-                else State = WorkflowState.Success;
+                else
+                {
+                    State = WorkflowState.Success;
+                    WorkflowDiagnostics.Event("4 Reviewer", "transition", "REVIEWER_PASS_WORKFLOW_SUCCESS");
+                }
                 break;
         }
-        Save(); return true;
+
+        Save();
+        WorkflowDiagnostics.Snapshot(this, CurrentRole == AgentRole.Reviewer && State == WorkflowState.Running ? "READY_FOR_REVIEWER" : "ANSWER_PROCESSED",
+            $"previousRole={roleBefore}; currentRole={CurrentRole}; state={State}; fixAttempts={FixAttempts}");
+        return true;
     }
 
     public string BuildCurrentPrompt() => CurrentRole switch
@@ -245,6 +312,14 @@ public sealed class OrchestrationEngine
         if (string.Equals(firstLine, "PASS", StringComparison.OrdinalIgnoreCase)) return ReviewVerdict.Pass;
         if (string.Equals(firstLine, "FAIL", StringComparison.OrdinalIgnoreCase)) return ReviewVerdict.Fail;
         return ReviewVerdict.Unknown;
+    }
+
+    private static string RoleLabel(AgentRole role) => $"{(int)role + 1} {role}";
+
+    private static string Tail(string? value, int max)
+    {
+        var text = value ?? string.Empty;
+        return text.Length <= max ? text : text[^max..];
     }
 
     private enum ReviewVerdict { Unknown, Pass, Fail }
