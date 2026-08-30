@@ -177,10 +177,12 @@ public sealed class OrchestrationEngine
 
             重要: <<<CONTENT と CONTENT の間にはファイルそのものだけを書いてください。
             ```xml や ```csharp などのMarkdownコードフェンス、説明文、ファイル名見出しを混ぜてはいけません。
+            MODIFYでは提示された COMPLETE FILE を基準に、必要箇所以外を一切書き換えないでください。無関係な整形、改行変更、並べ替え、リファクタリング、既存処理の再生成は禁止です。
+            Plannerが複数の変更対象ファイルを指定し、それらがWORKSPACE_CONTEXTに完全な内容で存在する場合は、計画どおり各対象ファイルを最小差分で変更してください。別ファイルの動的生成で計画を迂回しないでください。
             XAML/XMLは単一の正しいルート要素で閉じ、終了タグより後ろに余分な文字を置いてはいけません。
             ローカルbuild/testが失敗した場合は LOCAL_EXECUTION_FEEDBACK を最優先で読み、同じ失敗を繰り返さず修正してください。
+            Reviewerから修正指摘がある場合は REVIEW_FEEDBACK を最優先で反映し、指摘された無関係な差分を元に戻してください。
             説明だけで終わらず、実装が必要なら必ず上記ブロックを出してください。
-            Reviewerから修正指摘がある場合は必ず反映してください。
             最後に CODER_DONE と書いてください。
 
             USER_REQUEST:
