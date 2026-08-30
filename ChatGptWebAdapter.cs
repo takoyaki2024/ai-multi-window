@@ -82,7 +82,11 @@ public sealed class ChatGptWebAdapter
                 return accepted;
             }
 
-            _pendingResponse = new ResponseBaseline(initial.AssistantCount, initial.UserCount, message);
+            _pendingResponse = new ResponseBaseline(
+                initial.AssistantCount,
+                initial.UserCount,
+                initial.LatestAssistantText,
+                message);
             Log(log, "SEND_ACCEPTED", "matching user turn and assistant generation observed");
             await FlushLogAsync(log);
             return new(true, "ACCEPTED", BuildDetail("A matching new user turn and assistant generation were observed."));
@@ -100,29 +104,69 @@ public sealed class ChatGptWebAdapter
     public async Task<string?> WaitForLatestResponseAsync(CancellationToken cancellationToken = default)
     {
         await _operationLock.WaitAsync(cancellationToken);
+        var log = new StringBuilder();
         try
         {
             var baseline = _pendingResponse;
-            if (baseline is null) return null;
+            if (baseline is null)
+            {
+                Log(log, "RESPONSE_WAIT_SKIPPED", "No pending accepted send baseline exists.");
+                await FlushLogAsync(log);
+                return null;
+            }
+
+            Log(log, "RESPONSE_WAIT_START",
+                $"baselineUsers={baseline.UserCount}; baselineAssistants={baseline.AssistantCount}; baselineAssistantLength={baseline.LatestAssistantText.Length}; expectedUserLength={baseline.Message.Length}");
 
             string? stableText = null;
             var stableReads = 0;
+            ComposerState? last = null;
+
             for (var i = 0; i < 240; i++)
             {
-                var state = await ReadStateAsync(cancellationToken);
-                if (state.AssistantCount > baseline.AssistantCount && !string.IsNullOrWhiteSpace(state.LatestAssistantText))
+                last = await ReadStateAsync(cancellationToken);
+
+                // ChatGPT's DOM can reuse or regroup turn wrappers, so relying only on
+                // AssistantCount increasing can miss a real newly-completed response.
+                // Tie the response to the accepted user turn and accept either a new
+                // assistant wrapper OR a changed latest assistant body.
+                var matchingUserTurn = TextEquals(last.LatestUserText, baseline.Message);
+                var assistantChanged = !TextEquals(last.LatestAssistantText, baseline.LatestAssistantText);
+                var assistantAdvanced = last.AssistantCount > baseline.AssistantCount || assistantChanged;
+                var hasResponseText = !string.IsNullOrWhiteSpace(last.LatestAssistantText);
+
+                if (matchingUserTurn && assistantAdvanced && hasResponseText)
                 {
-                    if (!state.Generating && string.Equals(stableText, state.LatestAssistantText, StringComparison.Ordinal)) stableReads++;
-                    else stableReads = 0;
-                    stableText = state.LatestAssistantText;
-                    if (!state.Generating && stableReads >= 2)
+                    if (!last.Generating && string.Equals(stableText, last.LatestAssistantText, StringComparison.Ordinal))
+                        stableReads++;
+                    else
+                        stableReads = 0;
+
+                    stableText = last.LatestAssistantText;
+                    if (!last.Generating && stableReads >= 2)
                     {
+                        LogState(log, "RESPONSE_READY", last);
+                        Log(log, "RESPONSE_ACCEPTED",
+                            $"assistantCountAdvanced={last.AssistantCount > baseline.AssistantCount}; assistantTextChanged={assistantChanged}; responseLength={stableText.Length}");
                         _pendingResponse = null;
+                        await FlushLogAsync(log);
                         return stableText;
                     }
                 }
+
+                if (i == 0 || i == 10 || i == 30 || i == 60 || i == 120 || i == 180)
+                {
+                    Log(log, "RESPONSE_WAIT_CHECK",
+                        $"iteration={i}; matchingUser={matchingUserTurn}; assistantCount={last.AssistantCount}; baselineAssistantCount={baseline.AssistantCount}; assistantChanged={assistantChanged}; assistantLength={last.LatestAssistantText.Length}; generating={last.Generating}; stableReads={stableReads}");
+                }
+
                 await Task.Delay(500, cancellationToken);
             }
+
+            if (last is not null)
+                LogState(log, "RESPONSE_TIMEOUT_STATE", last);
+            Log(log, "RESPONSE_TIMEOUT", "No stable response tied to the accepted user turn was observed within two minutes.");
+            await FlushLogAsync(log);
             throw new TimeoutException("The matching ChatGPT response did not finish within two minutes.");
         }
         finally { _operationLock.Release(); }
@@ -338,10 +382,6 @@ public sealed class ChatGptWebAdapter
     private static bool TextEquals(string? left, string? right) =>
         string.Equals(Normalize(left), Normalize(right), StringComparison.Ordinal);
 
-    // contenteditable/innerText can represent one visual line break differently from the
-    // string sent through CDP (for example an extra DOM newline between block nodes).
-    // Compare transport text after normalizing only DOM/editor whitespace artifacts;
-    // all non-whitespace characters still have to match exactly.
     private static string Normalize(string? value)
     {
         var text = (value ?? string.Empty)
@@ -366,7 +406,12 @@ public sealed class ChatGptWebAdapter
         return escaped.Length <= max ? escaped : escaped[..max] + "…";
     }
 
-    private sealed record ResponseBaseline(int AssistantCount, int UserCount, string Message);
+    private sealed record ResponseBaseline(
+        int AssistantCount,
+        int UserCount,
+        string LatestAssistantText,
+        string Message);
+
     private sealed class ComposerState
     {
         public string Url { get; set; } = string.Empty;
