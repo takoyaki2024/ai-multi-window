@@ -13,7 +13,7 @@
                 Background="#F3F4F6"
                 BorderBrush="#D1D5DB"
                 BorderThickness="0,0,0,1"
-                Padding="12,10">
+                Padding="8,6">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -28,34 +28,34 @@
 
                     <TextBlock Text="AI Multi Window — 3 Chat"
                                VerticalAlignment="Center"
-                               FontSize="17"
+                               FontSize="15"
                                FontWeight="SemiBold"/>
 
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
                         <Button Content="均等に戻す"
-                                Height="32"
-                                Padding="12,0"
-                                Margin="0,0,6,0"
+                                Height="28"
+                                Padding="10,0"
+                                Margin="0,0,5,0"
                                 Click="ResetLayout_Click"
                                 ToolTip="3画面を均等幅に戻します"/>
                         <Button Content="全画面"
-                                Height="32"
-                                Padding="12,0"
+                                Height="28"
+                                Padding="10,0"
                                 Click="Fullscreen_Click"
                                 ToolTip="F11"/>
                     </StackPanel>
                 </Grid>
 
-                <Grid Grid.Row="1" Margin="0,10,0,0">
+                <Grid Grid.Row="1" Margin="0,6,0,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
                     <TextBox x:Name="SharedPromptTextBox"
-                             MinHeight="72"
-                             MaxHeight="140"
-                             Padding="10,8"
+                             MinHeight="48"
+                             MaxHeight="96"
+                             Padding="8,6"
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
@@ -63,9 +63,9 @@
 
                     <Button Grid.Column="1"
                             Content="全部へ貼り付け"
-                            MinWidth="140"
-                            Margin="10,0,0,0"
-                            Padding="14,0"
+                            MinWidth="125"
+                            Margin="8,0,0,0"
+                            Padding="12,0"
                             FontWeight="SemiBold"
                             Click="PasteAll_Click"
                             ToolTip="共通入力を1・2・3すべてのチャット入力欄へ入れます。送信はしません。"/>
@@ -77,8 +77,9 @@
                 Background="#F9FAFB"
                 BorderBrush="#E5E7EB"
                 BorderThickness="0,1,0,0"
-                Padding="10,5">
+                Padding="8,3">
             <TextBlock x:Name="StatusText"
+                       FontSize="11"
                        Foreground="#6B7280"
                        Text="準備完了 — 3つの独立したチャットを表示します"/>
         </Border>
