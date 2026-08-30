@@ -1,6 +1,7 @@
 using Microsoft.Web.WebView2.Core;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace AiMultiWindow;
 
@@ -24,7 +25,7 @@ public sealed class ChatGptWebAdapter
         var log = new StringBuilder();
         try
         {
-            Log(log, "SEND_START", $"expectedLength={message.Length}");
+            Log(log, "SEND_START", $"expectedLength={message.Length}; normalizedExpectedLength={Normalize(message).Length}");
             var initial = await ReadStateAsync(cancellationToken);
             LogState(log, "INITIAL", initial);
 
@@ -60,7 +61,10 @@ public sealed class ChatGptWebAdapter
 
             LogState(log, "READY_CHECK", ready);
             if (!TextEquals(ready.ComposerText, message))
-                return await FailAsync(log, "INPUT_MISMATCH", $"Composer text does not match. expectedLength={message.Length}, actualLength={ready.ComposerText.Length}");
+            {
+                Log(log, "INPUT_COMPARE", $"expectedNormalized={EscapeForLog(Normalize(message))}; actualNormalized={EscapeForLog(Normalize(ready.ComposerText))}");
+                return await FailAsync(log, "INPUT_MISMATCH", $"Composer text does not match after DOM whitespace normalization. expectedLength={message.Length}, actualLength={ready.ComposerText.Length}, normalizedExpectedLength={Normalize(message).Length}, normalizedActualLength={Normalize(ready.ComposerText).Length}");
+            }
             if (!ready.SendButtonEnabled || ready.SendX is null || ready.SendY is null)
                 return await FailAsync(log, "SEND_NOT_READY", $"Send button is unavailable. selector={ready.SendSelector ?? "none"}");
             if (!ready.SendHitTestMatches)
@@ -151,7 +155,11 @@ public sealed class ChatGptWebAdapter
             }
         }
 
-        if (last is not null) LogState(log, "ACCEPTANCE_TIMEOUT_STATE", last);
+        if (last is not null)
+        {
+            LogState(log, "ACCEPTANCE_TIMEOUT_STATE", last);
+            Log(log, "ACCEPTANCE_COMPARE", $"expectedNormalizedLength={Normalize(message).Length}; latestUserNormalizedLength={Normalize(last.LatestUserText).Length}; latestUserNormalized={EscapeForLog(Normalize(last.LatestUserText))}");
+        }
         return userObserved
             ? new(false, "GENERATION_NOT_STARTED", BuildDetail("The user turn appeared, but assistant generation was not observed."))
             : new(false, "USER_TURN_NOT_OBSERVED", BuildDetail("No matching new user conversation turn appeared after the single send trigger."));
@@ -324,13 +332,39 @@ public sealed class ChatGptWebAdapter
     private static void LogState(StringBuilder log, string stage, ComposerState s)
     {
         Log(log, stage,
-            $"url={s.Url}; host={s.Hostname}; chatgpt={s.IsChatGpt}; composer={s.ComposerFound}; composerSelector={s.ComposerSelector}; tag={s.ComposerTag}; contenteditable={s.ComposerContentEditable}; role={s.ComposerRole}; composerLength={s.ComposerText.Length}; active={s.ActiveElement}; sendSelector={s.SendSelector}; sendEnabled={s.SendButtonEnabled}; disabled={s.SendDisabled}; ariaDisabled={s.SendAriaDisabled}; x={s.SendX}; y={s.SendY}; hitMatches={s.SendHitTestMatches}; hit={s.HitElement}; users={s.UserCount}; assistants={s.AssistantCount}; latestUserLength={s.LatestUserText.Length}; latestAssistantLength={s.LatestAssistantText.Length}; generating={s.Generating}");
+            $"url={s.Url}; host={s.Hostname}; chatgpt={s.IsChatGpt}; composer={s.ComposerFound}; composerSelector={s.ComposerSelector}; tag={s.ComposerTag}; contenteditable={s.ComposerContentEditable}; role={s.ComposerRole}; composerLength={s.ComposerText.Length}; normalizedComposerLength={Normalize(s.ComposerText).Length}; active={s.ActiveElement}; sendSelector={s.SendSelector}; sendEnabled={s.SendButtonEnabled}; disabled={s.SendDisabled}; ariaDisabled={s.SendAriaDisabled}; x={s.SendX}; y={s.SendY}; hitMatches={s.SendHitTestMatches}; hit={s.HitElement}; users={s.UserCount}; assistants={s.AssistantCount}; latestUserLength={s.LatestUserText.Length}; latestAssistantLength={s.LatestAssistantText.Length}; generating={s.Generating}");
     }
 
     private static bool TextEquals(string? left, string? right) =>
         string.Equals(Normalize(left), Normalize(right), StringComparison.Ordinal);
 
-    private static string Normalize(string? value) => (value ?? string.Empty).Replace("\r\n", "\n").Trim();
+    // contenteditable/innerText can represent one visual line break differently from the
+    // string sent through CDP (for example an extra DOM newline between block nodes).
+    // Compare transport text after normalizing only DOM/editor whitespace artifacts;
+    // all non-whitespace characters still have to match exactly.
+    private static string Normalize(string? value)
+    {
+        var text = (value ?? string.Empty)
+            .Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Replace('\u00A0', ' ')
+            .Replace("\u200B", string.Empty, StringComparison.Ordinal)
+            .Replace("\uFEFF", string.Empty, StringComparison.Ordinal);
+
+        text = Regex.Replace(text, "[ \\t]*\\n[ \\t]*", "\n");
+        text = Regex.Replace(text, "\\n+", "\n");
+        return text.Trim();
+    }
+
+    private static string EscapeForLog(string value)
+    {
+        const int max = 500;
+        var escaped = value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\r", "\\r", StringComparison.Ordinal)
+            .Replace("\n", "\\n", StringComparison.Ordinal)
+            .Replace("\t", "\\t", StringComparison.Ordinal);
+        return escaped.Length <= max ? escaped : escaped[..max] + "…";
+    }
 
     private sealed record ResponseBaseline(int AssistantCount, int UserCount, string Message);
     private sealed class ComposerState
