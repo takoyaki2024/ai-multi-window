@@ -139,6 +139,8 @@ public sealed class OrchestrationEngine
             ビルド失敗、要求未達、危険な変更があれば先頭行を FAIL にしてください。
             問題なければ先頭行を PASS にしてください。FAILの場合は修正点を具体的に列挙してください。
 
+            重要: LOCAL_EXECUTION_RESULT に PASS_ALREADY_SATISFIED とあり、対象ファイルが既に存在していて内容が要求と完全一致し、WRITE_PERFORMED: false で安全に上書きを避けている場合は、最終状態として要求を満たしているものとして扱ってください。ユーザーが明示的に「必ず今回新規作成すること」自体を要求していない限り、それだけを理由にFAILにしないでください。
+
             USER_REQUEST:
             {TaskText}
 
