@@ -8,7 +8,7 @@ public static class WorkspaceContextBuilder
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
     private const int MaxCoderFiles = 4;
-    private const int MaxCoderContextChars = 24_000;
+    private const int MaxCoderContextChars = 40_000;
     private const int MaxCoderSingleFileChars = 80_000;
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -93,9 +93,6 @@ public static class WorkspaceContextBuilder
             .Where(info => TextExtensions.Contains(info.Extension))
             .ToList();
 
-        // CoderにはPlannerが実際に言及したファイルだけを優先して渡す。
-        // 以前はcsprojを常時追加していたため、UI変更でも30KB超のpromptになり
-        // WebView2のInput.insertTextが不安定になっていた。
         var mentioned = all
             .Where(f => PlannerMentionsFile(root, f, plannerAnswer))
             .OrderBy(f => CoderPriority(root, f))
@@ -103,7 +100,6 @@ public static class WorkspaceContextBuilder
             .Take(MaxCoderFiles)
             .ToList();
 
-        // Plannerが具体的なファイルを1つも挙げなかった場合だけ、安全な最小フォールバックを使う。
         if (mentioned.Count == 0)
         {
             mentioned = all
@@ -150,10 +146,10 @@ public static class WorkspaceContextBuilder
     private static int CoderPriority(string root, FileInfo info)
     {
         var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
-        if (relative.Equals("MainWindow.xaml.cs", StringComparison.OrdinalIgnoreCase)) return 0;
-        if (info.Extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)) return 1;
-        if (relative.Equals("MainWindow.xaml", StringComparison.OrdinalIgnoreCase)) return 2;
-        if (info.Extension.Equals(".xaml", StringComparison.OrdinalIgnoreCase)) return 3;
+        if (relative.Equals("MainWindow.xaml", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (relative.Equals("MainWindow.xaml.cs", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (info.Extension.Equals(".xaml", StringComparison.OrdinalIgnoreCase)) return 2;
+        if (info.Extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)) return 3;
         if (info.Extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)) return 4;
         return 5;
     }
