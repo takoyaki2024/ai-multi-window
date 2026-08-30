@@ -97,7 +97,9 @@ public sealed class BrowserPane : Grid
             Foreground = System.Windows.Media.Brushes.DimGray,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(8, 0, 2, 0),
-            MinWidth = 42
+            MinWidth = 42,
+            MaxWidth = 220,
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
 
         Grid.SetColumn(_promptBox, 0);
@@ -257,7 +259,10 @@ public sealed class BrowserPane : Grid
     public async Task<string?> GetLatestAnswerAsync()
     {
         if (_webView.CoreWebView2 is null)
+        {
+            _aiStatus.Text = "取得失敗: WebView未準備";
             return null;
+        }
 
         const string script = """
             (() => {
@@ -286,7 +291,22 @@ public sealed class BrowserPane : Grid
         {
             _aiStatus.Text = "取得中";
             var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(5));
-            var text = JsonSerializer.Deserialize<string>(raw);
+            if (string.IsNullOrWhiteSpace(raw) || raw == "null" || raw == "undefined")
+            {
+                _aiStatus.Text = "回答なし";
+                return null;
+            }
+
+            string? text;
+            try
+            {
+                text = JsonSerializer.Deserialize<string>(raw);
+            }
+            catch (JsonException)
+            {
+                text = raw.Trim('"');
+            }
+
             _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
@@ -295,9 +315,13 @@ public sealed class BrowserPane : Grid
             _aiStatus.Text = "取得タイムアウト";
             return null;
         }
-        catch
+        catch (Exception ex)
         {
-            _aiStatus.Text = "取得失敗";
+            var message = ex.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            if (message.Length > 80)
+                message = message[..80] + "…";
+            _aiStatus.Text = $"取得失敗: {ex.GetType().Name}";
+            _aiStatus.ToolTip = message;
             return null;
         }
     }
