@@ -19,7 +19,6 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-
         _settings = AppSettings.Load();
         _orchestrator = OrchestrationEngine.Load();
         _layoutCount = _settings.LayoutCount;
@@ -29,17 +28,14 @@ public partial class MainWindow : Window
         {
             var index = i;
             _panes[i] = new BrowserPane(_settings.Urls[i], i);
-            _panes[i].UrlChanged += url =>
-            {
-                _settings.Urls[index] = url;
-                _settings.Save();
-            };
+            _panes[i].UrlChanged += url => { _settings.Urls[index] = url; _settings.Save(); };
         }
 
         Loaded += (_, _) =>
         {
             ApplyLayout(_layoutCount);
             TaskTextBox.Text = _orchestrator.TaskText;
+            WorkspaceTextBox.Text = Environment.CurrentDirectory;
             UpdateOrchestratorUi();
         };
         Closing += MainWindow_Closing;
@@ -47,43 +43,20 @@ public partial class MainWindow : Window
 
     private void LayoutButton_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: string tag } && int.TryParse(tag, out var count))
-            ApplyLayout(count);
+        if (sender is Button { Tag: string tag } && int.TryParse(tag, out var count)) ApplyLayout(count);
     }
 
     private void ApplyLayout(int count)
     {
-        count = Math.Clamp(count, 1, 4);
-        _layoutCount = count;
-        _settings.LayoutCount = count;
-
-        foreach (var pane in _panes)
-            DetachFromParent(pane);
-
-        LayoutHost.Children.Clear();
-        LayoutHost.RowDefinitions.Clear();
-        LayoutHost.ColumnDefinitions.Clear();
-
-        FrameworkElement content = count switch
-        {
-            1 => BuildSingle(),
-            2 => BuildTwoColumns(),
-            3 => BuildThreePane(),
-            _ => BuildFourPane()
-        };
-
-        LayoutHost.Children.Add(content);
-        UpdateLayoutButtons();
-        StatusText.Text = $"{count}分割 — 境界線をドラッグしてサイズ変更できます";
-        _settings.Save();
+        count = Math.Clamp(count, 1, 4); _layoutCount = count; _settings.LayoutCount = count;
+        foreach (var pane in _panes) DetachFromParent(pane);
+        LayoutHost.Children.Clear(); LayoutHost.RowDefinitions.Clear(); LayoutHost.ColumnDefinitions.Clear();
+        FrameworkElement content = count switch { 1 => BuildSingle(), 2 => BuildTwoColumns(), 3 => BuildThreePane(), _ => BuildFourPane() };
+        LayoutHost.Children.Add(content); UpdateLayoutButtons();
+        StatusText.Text = $"{count}分割 — 境界線をドラッグしてサイズ変更できます"; _settings.Save();
     }
 
-    private FrameworkElement BuildSingle()
-    {
-        var grid = CreateContainer();
-        grid.Children.Add(_panes[0]);
-        return grid;
-    }
+    private FrameworkElement BuildSingle() { var grid = CreateContainer(); grid.Children.Add(_panes[0]); return grid; }
 
     private FrameworkElement BuildTwoColumns()
     {
@@ -91,13 +64,7 @@ public partial class MainWindow : Window
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        AddAt(grid, _panes[0], 0, 0);
-        var splitter = VerticalSplitter();
-        Grid.SetColumn(splitter, 1);
-        grid.Children.Add(splitter);
-        AddAt(grid, _panes[1], 0, 2);
-        return grid;
+        AddAt(grid, _panes[0], 0, 0); var splitter = VerticalSplitter(); Grid.SetColumn(splitter, 1); grid.Children.Add(splitter); AddAt(grid, _panes[1], 0, 2); return grid;
     }
 
     private FrameworkElement BuildThreePane()
@@ -106,132 +73,65 @@ public partial class MainWindow : Window
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        AddAt(grid, _panes[0], 0, 0);
-
-        var vertical = VerticalSplitter();
-        Grid.SetColumn(vertical, 1);
-        grid.Children.Add(vertical);
-
-        var right = CreateContainer();
-        right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) });
-        right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        AddAt(right, _panes[1], 0, 0);
-        var horizontal = HorizontalSplitter();
-        Grid.SetRow(horizontal, 1);
-        right.Children.Add(horizontal);
-        AddAt(right, _panes[2], 2, 0);
-
-        Grid.SetColumn(right, 2);
-        grid.Children.Add(right);
-        return grid;
+        AddAt(grid, _panes[0], 0, 0); var vertical = VerticalSplitter(); Grid.SetColumn(vertical, 1); grid.Children.Add(vertical);
+        var right = CreateContainer(); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) }); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        AddAt(right, _panes[1], 0, 0); var horizontal = HorizontalSplitter(); Grid.SetRow(horizontal, 1); right.Children.Add(horizontal); AddAt(right, _panes[2], 2, 0); Grid.SetColumn(right, 2); grid.Children.Add(right); return grid;
     }
 
     private FrameworkElement BuildFourPane()
     {
         var grid = CreateContainer();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        AddAt(grid, _panes[0], 0, 0);
-        AddAt(grid, _panes[1], 0, 2);
-        AddAt(grid, _panes[2], 2, 0);
-        AddAt(grid, _panes[3], 2, 2);
-
-        var vertical = VerticalSplitter();
-        Grid.SetColumn(vertical, 1);
-        Grid.SetRowSpan(vertical, 3);
-        grid.Children.Add(vertical);
-
-        var horizontal = HorizontalSplitter();
-        Grid.SetRow(horizontal, 1);
-        Grid.SetColumnSpan(horizontal, 3);
-        grid.Children.Add(horizontal);
-
-        return grid;
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) }); grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) }); grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        AddAt(grid, _panes[0], 0, 0); AddAt(grid, _panes[1], 0, 2); AddAt(grid, _panes[2], 2, 0); AddAt(grid, _panes[3], 2, 2);
+        var vertical = VerticalSplitter(); Grid.SetColumn(vertical, 1); Grid.SetRowSpan(vertical, 3); grid.Children.Add(vertical);
+        var horizontal = HorizontalSplitter(); Grid.SetRow(horizontal, 1); Grid.SetColumnSpan(horizontal, 3); grid.Children.Add(horizontal); return grid;
     }
 
     private async void StartOrchestration_Click(object sender, RoutedEventArgs e)
     {
         var task = TaskTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(task))
-        {
-            StatusText.Text = "依頼を入力してください";
-            return;
-        }
-
-        _orchestrator.Start(task);
-        ApplyLayout(4);
-        UpdateOrchestratorUi();
-        await SendCurrentStepAsync();
+        if (string.IsNullOrWhiteSpace(task)) { StatusText.Text = "依頼を入力してください"; return; }
+        _orchestrator.Start(task); ApplyLayout(4); UpdateOrchestratorUi(); await SendCurrentStepAsync();
     }
 
     private void StopOrchestration_Click(object sender, RoutedEventArgs e)
     {
-        if (_orchestrator.State == WorkflowState.Running)
-            _orchestrator.Stop("ユーザーが停止しました");
-        UpdateOrchestratorUi();
-        StatusText.Text = "司令塔を停止しました";
+        if (_orchestrator.State == WorkflowState.Running) _orchestrator.Stop("ユーザーが停止しました");
+        UpdateOrchestratorUi(); StatusText.Text = "司令塔を停止しました";
     }
 
     private void ResetOrchestration_Click(object sender, RoutedEventArgs e)
     {
-        _orchestrator.Reset();
-        TaskTextBox.Clear();
-        UpdateOrchestratorUi();
-        StatusText.Text = "司令塔をリセットしました";
+        _orchestrator.Reset(); TaskTextBox.Clear(); UpdateOrchestratorUi(); StatusText.Text = "司令塔をリセットしました";
     }
 
     private async void CaptureAndAdvance_Click(object sender, RoutedEventArgs e)
     {
-        if (_orchestrator.State != WorkflowState.Running)
-        {
-            StatusText.Text = "実行中のタスクがありません";
-            return;
-        }
-
-        var role = _orchestrator.CurrentRole;
-        var pane = _panes[(int)role];
-        CaptureNextButton.IsEnabled = false;
-        CaptureNextButton.Content = "回答取得中...";
-        StatusText.Text = $"{role} の回答を取得中...";
+        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "実行中のタスクがありません"; return; }
+        var role = _orchestrator.CurrentRole; var pane = _panes[(int)role];
+        CaptureNextButton.IsEnabled = false; CaptureNextButton.Content = "回答取得中..."; StatusText.Text = $"{role} の回答を取得中...";
 
         try
         {
             var answer = await pane.GetLatestAnswerAsync();
-            if (string.IsNullOrWhiteSpace(answer))
+            if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; return; }
+
+            if (role == AgentRole.Coder)
             {
-                StatusText.Text = $"{role} の回答を取得できませんでした";
-                return;
+                var workspace = WorkspaceTextBox.Text.Trim();
+                StatusText.Text = "Coder変更をWorkspaceへ適用してビルド中...";
+                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(workspace, answer);
+                var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
+                _orchestrator.SetExecutionResult(executionText);
+                if (!execution.Success)
+                    StatusText.Text = "ローカル適用/ビルドに失敗。Reviewerへ結果を渡します。";
             }
 
-            var advanced = _orchestrator.RecordAnswer(answer);
-            UpdateOrchestratorUi();
-
-            if (_orchestrator.State == WorkflowState.Success)
-            {
-                StatusText.Text = "レビューPASS — ワークフロー完了";
-                return;
-            }
-
-            if (_orchestrator.State == WorkflowState.Stopped)
-            {
-                StatusText.Text = _orchestrator.StopReason;
-                return;
-            }
-
-            if (!advanced)
-            {
-                StatusText.Text = "回答を処理できなかったため停止しました";
-                return;
-            }
-
+            var advanced = _orchestrator.RecordAnswer(answer); UpdateOrchestratorUi();
+            if (_orchestrator.State == WorkflowState.Success) { StatusText.Text = "レビューPASS — ワークフロー完了"; return; }
+            if (_orchestrator.State == WorkflowState.Stopped) { StatusText.Text = _orchestrator.StopReason; return; }
+            if (!advanced) { StatusText.Text = "回答を処理できなかったため停止しました"; return; }
             await SendCurrentStepAsync();
         }
         finally
@@ -243,180 +143,68 @@ public partial class MainWindow : Window
 
     private async void ResendCurrent_Click(object sender, RoutedEventArgs e)
     {
-        if (_orchestrator.State != WorkflowState.Running)
-        {
-            StatusText.Text = "再送できる実行中タスクがありません";
-            return;
-        }
-
+        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "再送できる実行中タスクがありません"; return; }
         await SendCurrentStepAsync();
     }
 
     private void ChatGptMode_Click(object sender, RoutedEventArgs e)
     {
         const string chatGptUrl = "https://chatgpt.com/";
-        for (var i = 0; i < _panes.Length; i++)
-        {
-            _panes[i].HomeUrl = chatGptUrl;
-            _panes[i].NavigateHome();
-            _settings.Urls[i] = chatGptUrl;
-        }
-        _settings.Save();
-        ApplyLayout(4);
-        StatusText.Text = "4ペインを独立ChatGPTプロファイルに設定しました";
+        for (var i = 0; i < _panes.Length; i++) { _panes[i].HomeUrl = chatGptUrl; _panes[i].NavigateHome(); _settings.Urls[i] = chatGptUrl; }
+        _settings.Save(); ApplyLayout(4); StatusText.Text = "4ペインを独立ChatGPTプロファイルに設定しました";
     }
 
     private async Task SendCurrentStepAsync()
     {
-        if (_orchestrator.State != WorkflowState.Running)
-            return;
-
-        if (!_orchestrator.MarkPromptSent())
-        {
-            UpdateOrchestratorUi();
-            StatusText.Text = _orchestrator.StopReason;
-            return;
-        }
-
-        var role = _orchestrator.CurrentRole;
-        var pane = _panes[(int)role];
-        var prompt = _orchestrator.BuildCurrentPrompt();
-        StatusText.Text = $"{role} へ送信中...";
-        var sent = await pane.SendMessageAsync(prompt);
-
-        if (!sent)
-        {
-            StatusText.Text = $"{role} への自動送信に失敗しました。各ペインの入力欄から手動送信できます。";
-        }
-        else
-        {
-            StatusText.Text = $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。";
-        }
-
+        if (_orchestrator.State != WorkflowState.Running) return;
+        if (!_orchestrator.MarkPromptSent()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; return; }
+        var role = _orchestrator.CurrentRole; var pane = _panes[(int)role]; var prompt = _orchestrator.BuildCurrentPrompt();
+        StatusText.Text = $"{role} へ送信中..."; var sent = await pane.SendMessageAsync(prompt);
+        StatusText.Text = sent ? $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。" : $"{role} への自動送信に失敗しました。各ペインの入力欄から手動送信できます。";
         UpdateOrchestratorUi();
     }
 
     private void UpdateOrchestratorUi()
     {
-        WorkflowStateText.Text = $"State: {_orchestrator.State}";
-        CurrentRoleText.Text = $"Role: {_orchestrator.CurrentRole}";
-        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls}";
-        FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}";
-        StopReasonText.Text = _orchestrator.StopReason;
-
-        var running = _orchestrator.State == WorkflowState.Running;
-        CaptureNextButton.IsEnabled = running;
-        ResendButton.IsEnabled = running;
+        WorkflowStateText.Text = $"State: {_orchestrator.State}"; CurrentRoleText.Text = $"Role: {_orchestrator.CurrentRole}";
+        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls}"; FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}"; StopReasonText.Text = _orchestrator.StopReason;
+        var running = _orchestrator.State == WorkflowState.Running; CaptureNextButton.IsEnabled = running; ResendButton.IsEnabled = running;
     }
 
-    private static Grid CreateContainer() => new()
-    {
-        Background = Brushes.Black,
-        ClipToBounds = true
-    };
-
-    private static void AddAt(Grid grid, UIElement element, int row, int column)
-    {
-        Grid.SetRow(element, row);
-        Grid.SetColumn(element, column);
-        grid.Children.Add(element);
-    }
-
-    private static GridSplitter VerticalSplitter() => new()
-    {
-        Width = 6,
-        HorizontalAlignment = HorizontalAlignment.Stretch,
-        VerticalAlignment = VerticalAlignment.Stretch,
-        Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)),
-        ResizeDirection = GridResizeDirection.Columns,
-        ResizeBehavior = GridResizeBehavior.PreviousAndNext,
-        Cursor = Cursors.SizeWE,
-        ShowsPreview = false
-    };
-
-    private static GridSplitter HorizontalSplitter() => new()
-    {
-        Height = 6,
-        HorizontalAlignment = HorizontalAlignment.Stretch,
-        VerticalAlignment = VerticalAlignment.Stretch,
-        Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)),
-        ResizeDirection = GridResizeDirection.Rows,
-        ResizeBehavior = GridResizeBehavior.PreviousAndNext,
-        Cursor = Cursors.SizeNS,
-        ShowsPreview = false
-    };
-
-    private static void DetachFromParent(UIElement element)
-    {
-        if (element is FrameworkElement { Parent: Panel panel })
-            panel.Children.Remove(element);
-    }
+    private static Grid CreateContainer() => new() { Background = Brushes.Black, ClipToBounds = true };
+    private static void AddAt(Grid grid, UIElement element, int row, int column) { Grid.SetRow(element, row); Grid.SetColumn(element, column); grid.Children.Add(element); }
+    private static GridSplitter VerticalSplitter() => new() { Width = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Columns, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeWE, ShowsPreview = false };
+    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeNS, ShowsPreview = false };
+    private static void DetachFromParent(UIElement element) { if (element is FrameworkElement { Parent: Panel panel }) panel.Children.Remove(element); }
 
     private void UpdateLayoutButtons()
     {
         var buttons = new[] { Layout1Button, Layout2Button, Layout3Button, Layout4Button };
-        for (var i = 0; i < buttons.Length; i++)
-            buttons[i].FontWeight = i + 1 == _layoutCount ? FontWeights.Bold : FontWeights.Normal;
+        for (var i = 0; i < buttons.Length; i++) buttons[i].FontWeight = i + 1 == _layoutCount ? FontWeights.Bold : FontWeights.Normal;
     }
 
     private void ResetLayout_Click(object sender, RoutedEventArgs e) => ApplyLayout(_layoutCount);
-
     private void Fullscreen_Click(object sender, RoutedEventArgs e) => ToggleFullscreen();
 
     private void ToggleFullscreen()
     {
-        if (!_isFullscreen)
-        {
-            _previousWindowStyle = WindowStyle;
-            _previousWindowState = WindowState;
-            WindowStyle = WindowStyle.None;
-            WindowState = WindowState.Maximized;
-            _isFullscreen = true;
-            StatusText.Text = "全画面表示 — F11で戻る";
-        }
-        else
-        {
-            WindowStyle = _previousWindowStyle;
-            WindowState = _previousWindowState;
-            _isFullscreen = false;
-            StatusText.Text = $"{_layoutCount}分割";
-        }
+        if (!_isFullscreen) { _previousWindowStyle = WindowStyle; _previousWindowState = WindowState; WindowStyle = WindowStyle.None; WindowState = WindowState.Maximized; _isFullscreen = true; StatusText.Text = "全画面表示 — F11で戻る"; }
+        else { WindowStyle = _previousWindowStyle; WindowState = _previousWindowState; _isFullscreen = false; StatusText.Text = $"{_layoutCount}分割"; }
     }
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.F11)
-        {
-            ToggleFullscreen();
-            e.Handled = true;
-            return;
-        }
-
+        if (e.Key == Key.F11) { ToggleFullscreen(); e.Handled = true; return; }
         if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
         {
-            var count = e.Key switch
-            {
-                Key.D1 or Key.NumPad1 => 1,
-                Key.D2 or Key.NumPad2 => 2,
-                Key.D3 or Key.NumPad3 => 3,
-                Key.D4 or Key.NumPad4 => 4,
-                _ => 0
-            };
-
-            if (count > 0)
-            {
-                ApplyLayout(count);
-                e.Handled = true;
-            }
+            var count = e.Key switch { Key.D1 or Key.NumPad1 => 1, Key.D2 or Key.NumPad2 => 2, Key.D3 or Key.NumPad3 => 3, Key.D4 or Key.NumPad4 => 4, _ => 0 };
+            if (count > 0) { ApplyLayout(count); e.Handled = true; }
         }
     }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
-        _settings.LayoutCount = _layoutCount;
-        for (var i = 0; i < _panes.Length; i++)
-            _settings.Urls[i] = _panes[i].HomeUrl;
-        _settings.Save();
-        _orchestrator.Save();
+        _settings.LayoutCount = _layoutCount; for (var i = 0; i < _panes.Length; i++) _settings.Urls[i] = _panes[i].HomeUrl;
+        _settings.Save(); _orchestrator.Save();
     }
 }
