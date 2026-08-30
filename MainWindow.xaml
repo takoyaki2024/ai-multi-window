@@ -94,6 +94,19 @@
                         </StackPanel>
                     </Border>
 
+                    <Border Background="White" BorderBrush="#D1D5DB" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,10,0,0">
+                        <StackPanel>
+                            <TextBlock Text="処理モニター" FontWeight="Bold" Margin="0,0,0,7"/>
+                            <TextBlock x:Name="ActivityHealthText" Text="⚪ 待機中" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <TextBlock x:Name="ActivityRoleText" Text="工程: -" Margin="0,0,0,3"/>
+                            <TextBlock x:Name="ActivityStageText" Text="処理: 待機中" TextWrapping="Wrap" Margin="0,0,0,3"/>
+                            <TextBlock x:Name="ActivityElapsedText" Text="経過: 00:00" Margin="0,0,0,3"/>
+                            <TextBlock x:Name="ActivityHeartbeatText" Text="UI heartbeat: -" Margin="0,0,0,6"/>
+                            <ProgressBar x:Name="ActivityProgressBar" Height="8" Minimum="0" Maximum="120" Value="0"/>
+                            <TextBlock x:Name="ActivityTimeoutText" Text="上限目安: -" Foreground="#6B7280" Margin="0,5,0,0"/>
+                        </StackPanel>
+                    </Border>
+
                     <TextBlock Margin="0,14,0,4" FontWeight="Bold" Text="役割"/>
                     <TextBlock Text="1: Manager / 司令塔"/>
                     <TextBlock Text="2: Planner / 設計"/>
