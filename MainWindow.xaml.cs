@@ -76,10 +76,11 @@ public partial class MainWindow : Window
         var headerGrid = new Grid();
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var title = new TextBlock
         {
-            Text = $"Chat {paneIndex + 1}",
+            Text = $"{paneIndex + 1}",
             FontWeight = FontWeights.Bold,
             FontSize = 15,
             VerticalAlignment = VerticalAlignment.Center
@@ -87,18 +88,33 @@ public partial class MainWindow : Window
 
         var pasteButton = new Button
         {
-            Content = "共通入力を貼付",
+            Content = "貼付",
             Tag = paneIndex,
             Height = 30,
+            MinWidth = 54,
             Padding = new Thickness(10, 0, 10, 0),
-            ToolTip = $"共通入力をChat {paneIndex + 1}へ入れます。送信はしません。"
+            ToolTip = $"共通入力を{paneIndex + 1}へ入れます。送信はしません。"
         };
         pasteButton.Click += PasteToPane_Click;
 
+        var copyButton = new Button
+        {
+            Content = "コピー",
+            Tag = paneIndex,
+            Height = 30,
+            MinWidth = 62,
+            Margin = new Thickness(6, 0, 0, 0),
+            Padding = new Thickness(10, 0, 10, 0),
+            ToolTip = $"{paneIndex + 1}の最新回答をコピーします"
+        };
+        copyButton.Click += CopyFromPane_Click;
+
         Grid.SetColumn(title, 0);
         Grid.SetColumn(pasteButton, 1);
+        Grid.SetColumn(copyButton, 2);
         headerGrid.Children.Add(title);
         headerGrid.Children.Add(pasteButton);
+        headerGrid.Children.Add(copyButton);
         header.Child = headerGrid;
 
         Grid.SetRow(header, 0);
@@ -139,7 +155,7 @@ public partial class MainWindow : Window
         for (var i = 0; i < _panes.Length; i++)
             SetPanePromptText(i, text, focus: false);
 
-        StatusText.Text = "共通入力をChat 1・2・3へ貼り付けました（未送信）";
+        StatusText.Text = "共通入力を1・2・3へ貼り付けました（未送信）";
     }
 
     private void PasteToPane_Click(object sender, RoutedEventArgs e)
@@ -156,7 +172,29 @@ public partial class MainWindow : Window
         }
 
         SetPanePromptText(paneIndex, text, focus: true);
-        StatusText.Text = $"共通入力をChat {paneIndex + 1}へ貼り付けました（未送信）";
+        StatusText.Text = $"共通入力を{paneIndex + 1}へ貼り付けました（未送信）";
+    }
+
+    private void CopyFromPane_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: int paneIndex } || paneIndex < 0 || paneIndex >= _panes.Length)
+            return;
+
+        var copyButton = _panes[paneIndex]
+            .Children
+            .OfType<Grid>()
+            .Where(grid => Grid.GetRow(grid) == 1)
+            .SelectMany(grid => grid.Children.OfType<Button>())
+            .FirstOrDefault(button => string.Equals(button.Content?.ToString(), "最新回答コピー", StringComparison.Ordinal));
+
+        if (copyButton is null)
+        {
+            StatusText.Text = $"{paneIndex + 1}のコピー機能を見つけられませんでした";
+            return;
+        }
+
+        copyButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        StatusText.Text = $"{paneIndex + 1}の最新回答をコピーしています...";
     }
 
     private void SetPanePromptText(int paneIndex, string text, bool focus)
@@ -170,7 +208,7 @@ public partial class MainWindow : Window
 
         if (promptBox is null)
         {
-            StatusText.Text = $"Chat {paneIndex + 1} の入力欄を見つけられませんでした";
+            StatusText.Text = $"{paneIndex + 1} の入力欄を見つけられませんでした";
             return;
         }
 
