@@ -1,5 +1,6 @@
 bin/
 obj/
+.ai-multi-window/
 .vs/
 *.user
 *.suo
