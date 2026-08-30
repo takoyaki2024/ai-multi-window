@@ -45,13 +45,14 @@ public sealed class ChatGptWebAdapter
             LogState(log, "AFTER_CLEAR", cleared);
 
             await InsertTextAsync(message, log, cancellationToken);
+            await EnsureComposerVisibleAsync(cancellationToken);
 
             ComposerState? ready = null;
             for (var i = 0; i < 30; i++)
             {
                 await Task.Delay(100, cancellationToken);
                 ready = await ReadStateAsync(cancellationToken);
-                if (TextEquals(ready.ComposerText, message) && ready.SendButtonEnabled && ready.SendX is not null && ready.SendY is not null)
+                if (TextEquals(ready.ComposerText, message) && ready.SendButtonEnabled && ready.SendX is not null && ready.SendY is not null && ready.SendHitTestMatches)
                     break;
             }
 
@@ -102,7 +103,9 @@ public sealed class ChatGptWebAdapter
 
     private async Task InsertTextAsync(string message, StringBuilder log, CancellationToken cancellationToken)
     {
-        var timeoutSeconds = Math.Clamp(9 + (message.Length / 1000), 10, 60);
+        var timeoutSeconds = message.Length >= 20_000
+            ? 120
+            : Math.Clamp(9 + (message.Length / 1000), 10, 60);
         Log(log, "CDP_INSERT_TEXT_START", $"length={message.Length}; mode=single; timeoutSeconds={timeoutSeconds}");
         await CallCdpAsync(
             "Input.insertText",
@@ -110,6 +113,25 @@ public sealed class ChatGptWebAdapter
             cancellationToken,
             TimeSpan.FromSeconds(timeoutSeconds));
         Log(log, "CDP_INSERT_TEXT", "completed; mode=single");
+    }
+
+    private async Task EnsureComposerVisibleAsync(CancellationToken cancellationToken)
+    {
+        const string script = """
+            (() => {
+              const composer = document.querySelector('#prompt-textarea')
+                || document.querySelector('[contenteditable="true"][role="textbox"]')
+                || document.querySelector('div[contenteditable="true"]')
+                || document.querySelector('textarea');
+              if (!composer) return false;
+              const form = composer.closest('form') || composer.parentElement;
+              (form || composer).scrollIntoView({ block: 'end', inline: 'nearest' });
+              composer.focus();
+              return true;
+            })()
+            """;
+        await ExecuteJsonAsync<bool>(script, cancellationToken);
+        await Task.Delay(100, cancellationToken);
     }
 
     public async Task<string?> WaitForLatestResponseAsync(CancellationToken cancellationToken = default)
