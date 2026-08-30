@@ -35,6 +35,7 @@ public static class WorkspaceExecutor
 
         var verification = new StringBuilder();
         PendingRoot = root;
+        var satisfiedWithoutWrite = 0;
 
         try
         {
@@ -60,13 +61,33 @@ public static class WorkspaceExecutor
                     case "CREATE":
                         if (existedBefore)
                         {
-                            verification.AppendLine("PRECHECK_RESULT: FAIL (CREATE対象が既に存在)");
-                            return await FailAndRollbackAsync($"CREATE対象が既に存在します: {change.Path}", verification.ToString());
+                            var existingContent = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
+                            var alreadyMatches = string.Equals(existingContent, change.Content, StringComparison.Ordinal);
+                            verification.AppendLine($"PRECHECK_EXISTING_CONTENT_MATCH: {alreadyMatches.ToString().ToLowerInvariant()}");
+
+                            if (!alreadyMatches)
+                            {
+                                verification.AppendLine("PRECHECK_RESULT: FAIL (CREATE対象が既に存在し内容が異なる。上書き禁止)");
+                                return await FailAndRollbackAsync($"CREATE対象が既に存在し内容が異なります: {change.Path}", verification.ToString());
+                            }
+
+                            verification.AppendLine("PRECHECK_RESULT: PASS_ALREADY_SATISFIED (既存ファイルが要求内容と完全一致。上書きなし)");
+                            verification.AppendLine("WRITE_PERFORMED: false");
+                            verification.AppendLine("POSTCHECK_EXISTS: true");
+                            verification.AppendLine("CONTENT_EXACT_MATCH: true");
+                            verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+                            verification.AppendLine($"ACTUAL_LENGTH: {existingContent.Length}");
+                            verification.AppendLine("POSTCHECK_RESULT: PASS_ALREADY_SATISFIED");
+                            verification.AppendLine();
+                            satisfiedWithoutWrite++;
+                            continue;
                         }
+
                         verification.AppendLine("PRECHECK_RESULT: PASS (未存在を確認)");
                         PendingSnapshots.Add(new FileSnapshot(target, false, null));
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                         await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
+                        verification.AppendLine("WRITE_PERFORMED: true");
                         break;
 
                     case "MODIFY":
@@ -77,8 +98,22 @@ public static class WorkspaceExecutor
                         }
                         verification.AppendLine("PRECHECK_RESULT: PASS (存在を確認)");
                         var original = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
+                        if (string.Equals(original, change.Content, StringComparison.Ordinal))
+                        {
+                            verification.AppendLine("WRITE_PERFORMED: false");
+                            verification.AppendLine("POSTCHECK_EXISTS: true");
+                            verification.AppendLine("CONTENT_EXACT_MATCH: true");
+                            verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+                            verification.AppendLine($"ACTUAL_LENGTH: {original.Length}");
+                            verification.AppendLine("POSTCHECK_RESULT: PASS_ALREADY_SATISFIED");
+                            verification.AppendLine();
+                            satisfiedWithoutWrite++;
+                            continue;
+                        }
+
                         PendingSnapshots.Add(new FileSnapshot(target, true, original));
                         await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
+                        verification.AppendLine("WRITE_PERFORMED: true");
                         break;
 
                     default:
@@ -117,8 +152,9 @@ public static class WorkspaceExecutor
             if (test.ExitCode != 0)
                 return await FailAndRollbackAsync($"dotnet build に失敗しました。exit={test.ExitCode}", verification.ToString());
 
+            var changedCount = PendingSnapshots.Count;
             return new(true,
-                $"{changes.Count}ファイルを適用・読み返し検証済み。Reviewer判定待ち。dotnet build exit=0",
+                $"要求状態を検証済み。実変更 {changedCount}ファイル、既に一致 {satisfiedWithoutWrite}ファイル。Reviewer判定待ち。dotnet build exit=0",
                 verification.ToString().Trim());
         }
         catch (Exception ex)
