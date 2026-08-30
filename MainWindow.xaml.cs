@@ -197,8 +197,18 @@ public partial class MainWindow : Window
         if (_orchestrator.State != WorkflowState.Running) return;
         if (!_orchestrator.MarkPromptSent()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; return; }
         var role = _orchestrator.CurrentRole; var pane = _panes[(int)role]; var prompt = _orchestrator.BuildCurrentPrompt();
-        StatusText.Text = $"{role} へ送信中..."; var sent = await pane.SendMessageAsync(prompt);
-        StatusText.Text = sent ? $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。" : $"{role} への自動送信に失敗しました。各ペインの入力欄から手動送信できます。";
+        StatusText.Text = $"{role} へ送信中...";
+
+        var sent = await pane.SendMessageAsync(prompt);
+        if (!sent)
+        {
+            StatusText.Text = $"{role} の通常送信に失敗。実キーEnter送信を試行中...";
+            sent = await pane.TrySendPhysicalEnterAsync();
+        }
+
+        StatusText.Text = sent
+            ? $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。"
+            : $"{role} への自動送信に失敗しました。入力済みの文章を確認して手動でEnterを押してください。";
         UpdateOrchestratorUi();
     }
 
@@ -212,7 +222,7 @@ public partial class MainWindow : Window
     private static Grid CreateContainer() => new() { Background = Brushes.Black, ClipToBounds = true };
     private static void AddAt(Grid grid, UIElement element, int row, int column) { Grid.SetRow(element, row); Grid.SetColumn(element, column); grid.Children.Add(element); }
     private static GridSplitter VerticalSplitter() => new() { Width = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Columns, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeWE, ShowsPreview = false };
-    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeNS, ShowsPreview = false };
+    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeDirection.Rows, Cursor = Cursors.SizeNS, ShowsPreview = false };
     private static void DetachFromParent(UIElement element) { if (element is FrameworkElement { Parent: Panel panel }) panel.Children.Remove(element); }
 
     private void UpdateLayoutButtons()
