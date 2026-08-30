@@ -545,11 +545,11 @@ public static class WorkspaceExecutor
             var newline = text.IndexOf('\n', start);
             if (newline < 0)
             {
-                var contentEnd = text.Length;
-                if (contentEnd > start && text[contentEnd - 1] == '\r')
-                    contentEnd--;
+                var finalContentEnd = text.Length;
+                if (finalContentEnd > start && text[finalContentEnd - 1] == '\r')
+                    finalContentEnd--;
 
-                lines.Add(new LineSegment(start, contentEnd, text.Length));
+                lines.Add(new LineSegment(start, finalContentEnd, text.Length));
                 return lines;
             }
 
