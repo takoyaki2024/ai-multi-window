@@ -1,6 +1,5 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
-using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -181,8 +180,7 @@ public sealed class BrowserPane : Grid
 
     private async Task InitializeWebViewAsync()
     {
-        if (_webView.CoreWebView2 is not null)
-            return;
+        if (_webView.CoreWebView2 is not null) return;
 
         try
         {
@@ -203,8 +201,7 @@ public sealed class BrowserPane : Grid
             core.HistoryChanged += (_, _) => UpdateNavigationButtons();
             core.NavigationCompleted += (_, _) =>
             {
-                if (_webView.Source is not null)
-                    _addressBar.Text = _webView.Source.ToString();
+                if (_webView.Source is not null) _addressBar.Text = _webView.Source.ToString();
                 UpdateNavigationButtons();
                 _aiStatus.Text = "待機";
             };
@@ -239,7 +236,6 @@ public sealed class BrowserPane : Grid
         {
             _aiStatus.Text = "取得中";
             var text = await _chatAdapter.WaitForLatestResponseAsync(cancellationToken);
-
             _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
@@ -250,11 +246,29 @@ public sealed class BrowserPane : Grid
         }
         catch (Exception ex)
         {
-            var message = ex.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            if (message.Length > 120)
-                message = message[..120] + "…";
-            _aiStatus.Text = $"取得失敗: {ex.GetType().Name}";
-            _aiStatus.ToolTip = message;
+            SetExceptionStatus("取得失敗", ex);
+            return null;
+        }
+    }
+
+    public async Task<string?> GetVisibleLatestAnswerAsync(CancellationToken cancellationToken = default)
+    {
+        if (_chatAdapter is null)
+        {
+            _aiStatus.Text = "取得失敗: WebView未準備";
+            return null;
+        }
+
+        try
+        {
+            _aiStatus.Text = "最新回答取得中";
+            var text = await _chatAdapter.GetVisibleLatestAnswerAsync(cancellationToken);
+            _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception ex)
+        {
+            SetExceptionStatus("取得失敗", ex);
             return null;
         }
     }
@@ -286,7 +300,7 @@ public sealed class BrowserPane : Grid
     private async Task CopyLatestAnswerAsync()
     {
         SetAiControlsEnabled(false);
-        var answer = await GetLatestAnswerAsync();
+        var answer = await GetVisibleLatestAnswerAsync();
         if (!string.IsNullOrWhiteSpace(answer))
         {
             try
@@ -296,8 +310,7 @@ public sealed class BrowserPane : Grid
             }
             catch (Exception ex)
             {
-                _aiStatus.Text = $"コピー失敗: {ex.GetType().Name}";
-                _aiStatus.ToolTip = ex.Message;
+                SetExceptionStatus("コピー失敗", ex);
             }
         }
         SetAiControlsEnabled(true);
@@ -307,6 +320,14 @@ public sealed class BrowserPane : Grid
     {
         _sendButton.IsEnabled = enabled;
         _copyAnswerButton.IsEnabled = enabled;
+    }
+
+    private void SetExceptionStatus(string prefix, Exception ex)
+    {
+        var message = ex.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        if (message.Length > 160) message = message[..160] + "…";
+        _aiStatus.Text = $"{prefix}: {ex.GetType().Name}";
+        _aiStatus.ToolTip = message;
     }
 
     private void Navigate(string value)
