@@ -44,8 +44,7 @@ public sealed class ChatGptWebAdapter
             var cleared = await ReadStateAsync(cancellationToken);
             LogState(log, "AFTER_CLEAR", cleared);
 
-            await CallCdpAsync("Input.insertText", JsonSerializer.Serialize(new { text = message }), cancellationToken);
-            Log(log, "CDP_INSERT_TEXT", "completed");
+            await InsertTextAsync(message, log, cancellationToken);
 
             ComposerState? ready = null;
             for (var i = 0; i < 30; i++)
@@ -101,6 +100,24 @@ public sealed class ChatGptWebAdapter
         finally { _operationLock.Release(); }
     }
 
+    private async Task InsertTextAsync(string message, StringBuilder log, CancellationToken cancellationToken)
+    {
+        const int chunkSize = 2000;
+        var chunks = (message.Length + chunkSize - 1) / chunkSize;
+        Log(log, "CDP_INSERT_TEXT_START", $"length={message.Length}; chunks={chunks}; chunkSize={chunkSize}");
+
+        for (var offset = 0; offset < message.Length; offset += chunkSize)
+        {
+            var length = Math.Min(chunkSize, message.Length - offset);
+            var chunk = message.Substring(offset, length);
+            await CallCdpAsync("Input.insertText", JsonSerializer.Serialize(new { text = chunk }), cancellationToken, TimeSpan.FromSeconds(10));
+            if (chunks > 1)
+                await Task.Delay(20, cancellationToken);
+        }
+
+        Log(log, "CDP_INSERT_TEXT", $"completed; chunks={chunks}");
+    }
+
     public async Task<string?> WaitForLatestResponseAsync(CancellationToken cancellationToken = default)
     {
         await _operationLock.WaitAsync(cancellationToken);
@@ -125,11 +142,6 @@ public sealed class ChatGptWebAdapter
             for (var i = 0; i < 240; i++)
             {
                 last = await ReadStateAsync(cancellationToken);
-
-                // ChatGPT's DOM can reuse or regroup turn wrappers, so relying only on
-                // AssistantCount increasing can miss a real newly-completed response.
-                // Tie the response to the accepted user turn and accept either a new
-                // assistant wrapper OR a changed latest assistant body.
                 var matchingUserTurn = TextEquals(last.LatestUserText, baseline.Message);
                 var assistantChanged = !TextEquals(last.LatestAssistantText, baseline.LatestAssistantText);
                 var assistantAdvanced = last.AssistantCount > baseline.AssistantCount || assistantChanged;
@@ -336,8 +348,11 @@ public sealed class ChatGptWebAdapter
     private Task DispatchKeyAsync(string type, string key, string code, int virtualKey, int modifiers, CancellationToken cancellationToken) =>
         CallCdpAsync("Input.dispatchKeyEvent", JsonSerializer.Serialize(new { type, key, code, windowsVirtualKeyCode = virtualKey, nativeVirtualKeyCode = virtualKey, modifiers }), cancellationToken);
 
-    private async Task CallCdpAsync(string method, string payload, CancellationToken cancellationToken) =>
-        await _core.CallDevToolsProtocolMethodAsync(method, payload).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+    private Task CallCdpAsync(string method, string payload, CancellationToken cancellationToken) =>
+        CallCdpAsync(method, payload, cancellationToken, TimeSpan.FromSeconds(5));
+
+    private async Task CallCdpAsync(string method, string payload, CancellationToken cancellationToken, TimeSpan timeout) =>
+        await _core.CallDevToolsProtocolMethodAsync(method, payload).WaitAsync(timeout, cancellationToken);
 
     private async Task<T?> ExecuteJsonAsync<T>(string script, CancellationToken cancellationToken)
     {
