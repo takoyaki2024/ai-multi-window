@@ -48,7 +48,7 @@ public static class WorkspaceExecutor
         var root = Path.GetFullPath(workspaceRoot);
         var changes = ParseChanges(coderResponse).Take(MaxFiles + 1).ToList();
         if (changes.Count == 0)
-            return new(false, "Coder回答に適用可能な FILE/ACTION/CONTENT がありません。", string.Empty);
+            return new(false, "Coder回答に適用可能な FILE/ACTION/CONTENT または PATCH がありません。", string.Empty);
         if (changes.Count > MaxFiles)
             return new(false, $"変更ファイル数が上限 {MaxFiles} を超えています。", string.Empty);
 
@@ -63,8 +63,9 @@ public static class WorkspaceExecutor
         {
             foreach (var change in changes)
             {
-                if (change.Content.Length > MaxContentChars)
-                    return await FailAndRollbackAsync($"{change.Path}: 内容が大きすぎます。", verification.ToString());
+                var payloadLength = (change.Content?.Length ?? 0) + (change.Search?.Length ?? 0) + (change.Replace?.Length ?? 0);
+                if (payloadLength > MaxContentChars)
+                    return await FailAndRollbackAsync($"{change.Path}: 変更内容が大きすぎます。", verification.ToString());
 
                 var target = SafePath(root, change.Path);
                 if (target is null)
@@ -78,13 +79,17 @@ public static class WorkspaceExecutor
                 verification.AppendLine($"ACTION: {change.Action}");
                 verification.AppendLine($"PRECHECK_EXISTS: {existedBefore.ToString().ToLowerInvariant()}");
 
+                string expectedContent;
+
                 switch (change.Action)
                 {
                     case "CREATE":
+                    {
+                        expectedContent = change.Content ?? string.Empty;
                         if (existedBefore)
                         {
                             var existingContent = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
-                            var alreadyMatches = string.Equals(existingContent, change.Content, StringComparison.Ordinal);
+                            var alreadyMatches = string.Equals(existingContent, expectedContent, StringComparison.Ordinal);
                             verification.AppendLine($"PRECHECK_EXISTING_CONTENT_MATCH: {alreadyMatches.ToString().ToLowerInvariant()}");
 
                             if (!alreadyMatches)
@@ -97,7 +102,7 @@ public static class WorkspaceExecutor
                             verification.AppendLine("WRITE_PERFORMED: false");
                             verification.AppendLine("POSTCHECK_EXISTS: true");
                             verification.AppendLine("CONTENT_EXACT_MATCH: true");
-                            verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+                            verification.AppendLine($"EXPECTED_LENGTH: {expectedContent.Length}");
                             verification.AppendLine($"ACTUAL_LENGTH: {existingContent.Length}");
                             verification.AppendLine("POSTCHECK_RESULT: PASS_ALREADY_SATISFIED");
                             verification.AppendLine();
@@ -109,24 +114,28 @@ public static class WorkspaceExecutor
                         PendingSnapshots.Add(new FileSnapshot(target, false, null));
                         await PersistPendingAsync();
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                        await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
+                        await File.WriteAllTextAsync(target, expectedContent, Encoding.UTF8, cancellationToken);
                         verification.AppendLine("WRITE_PERFORMED: true");
                         break;
+                    }
 
                     case "MODIFY":
+                    {
+                        expectedContent = change.Content ?? string.Empty;
                         if (!existedBefore)
                         {
                             verification.AppendLine("PRECHECK_RESULT: FAIL (MODIFY対象が存在しない)");
                             return await FailAndRollbackAsync($"MODIFY対象が存在しません: {change.Path}", verification.ToString());
                         }
+
                         verification.AppendLine("PRECHECK_RESULT: PASS (存在を確認)");
                         var original = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
-                        if (string.Equals(original, change.Content, StringComparison.Ordinal))
+                        if (string.Equals(original, expectedContent, StringComparison.Ordinal))
                         {
                             verification.AppendLine("WRITE_PERFORMED: false");
                             verification.AppendLine("POSTCHECK_EXISTS: true");
                             verification.AppendLine("CONTENT_EXACT_MATCH: true");
-                            verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+                            verification.AppendLine($"EXPECTED_LENGTH: {expectedContent.Length}");
                             verification.AppendLine($"ACTUAL_LENGTH: {original.Length}");
                             verification.AppendLine("POSTCHECK_RESULT: PASS_ALREADY_SATISFIED");
                             verification.AppendLine();
@@ -136,9 +145,56 @@ public static class WorkspaceExecutor
 
                         PendingSnapshots.Add(new FileSnapshot(target, true, original));
                         await PersistPendingAsync();
-                        await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
+                        await File.WriteAllTextAsync(target, expectedContent, Encoding.UTF8, cancellationToken);
                         verification.AppendLine("WRITE_PERFORMED: true");
                         break;
+                    }
+
+                    case "PATCH":
+                    {
+                        if (!existedBefore)
+                        {
+                            verification.AppendLine("PRECHECK_RESULT: FAIL (PATCH対象が存在しない)");
+                            return await FailAndRollbackAsync($"PATCH対象が存在しません: {change.Path}", verification.ToString());
+                        }
+
+                        var search = change.Search ?? string.Empty;
+                        var replace = change.Replace ?? string.Empty;
+                        if (search.Length == 0)
+                        {
+                            verification.AppendLine("PRECHECK_RESULT: FAIL (SEARCHが空)");
+                            return await FailAndRollbackAsync($"PATCHのSEARCHが空です: {change.Path}", verification.ToString());
+                        }
+
+                        var original = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
+                        var matches = CountExactOccurrences(original, search);
+                        verification.AppendLine($"PATCH_SEARCH_MATCHES: {matches}");
+                        verification.AppendLine($"PATCH_SEARCH_LENGTH: {search.Length}");
+                        verification.AppendLine($"PATCH_REPLACE_LENGTH: {replace.Length}");
+
+                        if (matches != 1)
+                        {
+                            verification.AppendLine("PRECHECK_RESULT: FAIL (SEARCHは既存ファイル内で完全一致1件である必要があります)");
+                            return await FailAndRollbackAsync($"PATCHのSEARCH一致数が1ではありません: {change.Path} (matches={matches})", verification.ToString());
+                        }
+
+                        expectedContent = original.Replace(search, replace, StringComparison.Ordinal);
+                        if (string.Equals(original, expectedContent, StringComparison.Ordinal))
+                        {
+                            verification.AppendLine("PRECHECK_RESULT: PASS_ALREADY_SATISFIED");
+                            verification.AppendLine("WRITE_PERFORMED: false");
+                            verification.AppendLine();
+                            satisfiedWithoutWrite++;
+                            continue;
+                        }
+
+                        verification.AppendLine("PRECHECK_RESULT: PASS (SEARCH完全一致1件)");
+                        PendingSnapshots.Add(new FileSnapshot(target, true, original));
+                        await PersistPendingAsync();
+                        await File.WriteAllTextAsync(target, expectedContent, Encoding.UTF8, cancellationToken);
+                        verification.AppendLine("WRITE_PERFORMED: true");
+                        break;
+                    }
 
                     default:
                         return await FailAndRollbackAsync($"未対応ACTIONです: {change.Action}", verification.ToString());
@@ -153,9 +209,9 @@ public static class WorkspaceExecutor
                 }
 
                 var readBack = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
-                var exactMatch = string.Equals(readBack, change.Content, StringComparison.Ordinal);
+                var exactMatch = string.Equals(readBack, expectedContent, StringComparison.Ordinal);
                 verification.AppendLine($"CONTENT_EXACT_MATCH: {exactMatch.ToString().ToLowerInvariant()}");
-                verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+                verification.AppendLine($"EXPECTED_LENGTH: {expectedContent.Length}");
                 verification.AppendLine($"ACTUAL_LENGTH: {readBack.Length}");
 
                 if (!exactMatch)
@@ -271,12 +327,53 @@ public static class WorkspaceExecutor
 
     private static IEnumerable<FileChange> ParseChanges(string text)
     {
-        var pattern = new Regex(
+        text ??= string.Empty;
+        var parsed = new List<(int Index, FileChange Change)>();
+
+        var contentPattern = new Regex(
             @"(?ms)^FILE:\s*(?<path>[^\r\n]+)\s*\r?\nACTION:\s*(?<action>CREATE|MODIFY)\s*\r?\n<<<CONTENT\s*\r?\n(?<content>.*?)\r?\nCONTENT(?:\r?\n|$)",
             RegexOptions.CultureInvariant);
 
-        foreach (Match match in pattern.Matches(text ?? string.Empty))
-            yield return new FileChange(match.Groups["path"].Value.Trim(), match.Groups["action"].Value.Trim().ToUpperInvariant(), match.Groups["content"].Value);
+        foreach (Match match in contentPattern.Matches(text))
+        {
+            parsed.Add((match.Index, new FileChange(
+                match.Groups["path"].Value.Trim(),
+                match.Groups["action"].Value.Trim().ToUpperInvariant(),
+                match.Groups["content"].Value,
+                null,
+                null)));
+        }
+
+        var patchPattern = new Regex(
+            @"(?ms)^FILE:\s*(?<path>[^\r\n]+)\s*\r?\nACTION:\s*PATCH\s*\r?\n<<<SEARCH\s*\r?\n(?<search>.*?)\r?\nSEARCH\s*\r?\n<<<REPLACE\s*\r?\n(?<replace>.*?)\r?\nREPLACE(?:\r?\n|$)",
+            RegexOptions.CultureInvariant);
+
+        foreach (Match match in patchPattern.Matches(text))
+        {
+            parsed.Add((match.Index, new FileChange(
+                match.Groups["path"].Value.Trim(),
+                "PATCH",
+                null,
+                match.Groups["search"].Value,
+                match.Groups["replace"].Value)));
+        }
+
+        foreach (var item in parsed.OrderBy(x => x.Index))
+            yield return item.Change;
+    }
+
+    private static int CountExactOccurrences(string source, string search)
+    {
+        var count = 0;
+        var index = 0;
+        while (index <= source.Length - search.Length)
+        {
+            var found = source.IndexOf(search, index, StringComparison.Ordinal);
+            if (found < 0) break;
+            count++;
+            index = found + search.Length;
+        }
+        return count;
     }
 
     private static string? SafePath(string root, string relativePath)
@@ -307,7 +404,8 @@ public static class WorkspaceExecutor
             if (!seen.Add(target)) return $"同一ファイルが複数回指定されています: {change.Path}";
             if (HasReparsePointBetween(root, target)) return $"reparse point経由の変更を拒否しました: {change.Path}";
             if (change.Action == "CREATE" && File.Exists(target) && !string.Equals(File.ReadAllText(target), change.Content, StringComparison.Ordinal)) return $"CREATE対象が既に存在します: {change.Path}";
-            if (change.Action == "MODIFY" && !File.Exists(target)) return $"MODIFY対象が存在しません: {change.Path}";
+            if ((change.Action == "MODIFY" || change.Action == "PATCH") && !File.Exists(target)) return $"{change.Action}対象が存在しません: {change.Path}";
+            if (change.Action == "PATCH" && string.IsNullOrEmpty(change.Search)) return $"PATCHのSEARCHが空です: {change.Path}";
         }
         return null;
     }
@@ -335,7 +433,7 @@ public static class WorkspaceExecutor
         await File.WriteAllTextAsync(path, JsonSerializer.Serialize(stored), Encoding.UTF8);
     }
 
-    private sealed record FileChange(string Path, string Action, string Content);
+    private sealed record FileChange(string Path, string Action, string? Content, string? Search, string? Replace);
     private sealed record FileSnapshot(string Path, bool ExistedBefore, string? OriginalContent);
     private sealed record PersistedSnapshot(string RelativePath, bool ExistedBefore, string? OriginalContent);
 }
