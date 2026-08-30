@@ -216,8 +216,9 @@ public sealed class BrowserPane : Grid
         if (_webView.CoreWebView2 is null || string.IsNullOrWhiteSpace(message))
             return false;
 
+        _aiStatus.Text = "入力中";
         var messageJson = JsonSerializer.Serialize(message);
-        var script = $$"""
+        var fillScript = $$"""
             (() => {
                 const message = {{messageJson}};
                 const selectors = [
@@ -247,37 +248,63 @@ public sealed class BrowserPane : Grid
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 } else {
                     input.textContent = '';
+                    input.focus();
                     document.execCommand('insertText', false, message);
-                    if (!input.textContent) input.textContent = message;
+                    if (!(input.innerText || input.textContent || '').trim()) input.textContent = message;
                     input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
                 }
+                return 'OK:FILLED';
+            })();
+            """;
 
-                const sendSelectors = [
+        const string sendScript = """
+            (() => {
+                const selectors = [
                     'button[data-testid="send-button"]',
                     'button[aria-label*="Send"]',
                     'button[aria-label*="送信"]',
                     'button[title*="Send"]',
                     'button[title*="送信"]'
                 ];
-                for (const selector of sendSelectors) {
+                for (const selector of selectors) {
                     const button = Array.from(document.querySelectorAll(selector))
-                        .find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0);
-                    if (button) { button.click(); return 'OK:BUTTON'; }
+                        .find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0 && btn.getBoundingClientRect().height > 0);
+                    if (button) {
+                        button.focus();
+                        button.click();
+                        return 'OK:SENT';
+                    }
                 }
-
-                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-                return 'OK:ENTER';
+                return 'WAIT:SEND_BUTTON';
             })();
             """;
 
         try
         {
-            var raw = await ExecuteScriptWithRetryAsync(script, 8);
-            if (string.IsNullOrWhiteSpace(raw))
+            var fillRaw = await ExecuteScriptWithRetryAsync(fillScript, 8);
+            var fillResult = JsonSerializer.Deserialize<string>(fillRaw) ?? string.Empty;
+            if (fillResult != "OK:FILLED")
+            {
+                _aiStatus.Text = $"送信失敗: {fillResult}";
                 return false;
-            var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
-            return result.StartsWith("OK:", StringComparison.Ordinal);
+            }
+
+            _aiStatus.Text = "送信待機";
+            for (var attempt = 0; attempt < 12; attempt++)
+            {
+                await Task.Delay(attempt == 0 ? 250 : 350);
+                var sendRaw = await ExecuteScriptWithRetryAsync(sendScript, 4);
+                var sendResult = JsonSerializer.Deserialize<string>(sendRaw) ?? string.Empty;
+                if (sendResult == "OK:SENT")
+                {
+                    _aiStatus.Text = "送信済";
+                    return true;
+                }
+            }
+
+            _aiStatus.Text = "送信失敗: ボタン待機タイムアウト";
+            return false;
         }
         catch (Exception ex)
         {
