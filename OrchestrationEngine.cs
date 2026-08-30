@@ -23,6 +23,7 @@ public sealed class OrchestrationEngine
     public string LastAnswerHash { get; set; } = string.Empty;
     public int DuplicateCount { get; set; }
     public string ExecutionResult { get; set; } = string.Empty;
+    public string WorkspaceContext { get; set; } = string.Empty;
 
     private static string CheckpointDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AiMultiWindow");
     private static string CheckpointPath => Path.Combine(CheckpointDirectory, "orchestrator-checkpoint.json");
@@ -37,18 +38,20 @@ public sealed class OrchestrationEngine
         catch { return new OrchestrationEngine(); }
     }
 
-    public void Start(string task)
+    public void Start(string task, string workspaceContext = "")
     {
         TaskText = task.Trim(); State = WorkflowState.Running; CurrentRole = AgentRole.Manager;
         AiCalls = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
-        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; Save();
+        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty;
+        WorkspaceContext = workspaceContext; Save();
     }
 
     public void Reset()
     {
         TaskText = string.Empty; State = WorkflowState.Idle; CurrentRole = AgentRole.Manager;
         AiCalls = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
-        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; Save();
+        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty;
+        WorkspaceContext = string.Empty; Save();
     }
 
     public void Stop(string reason) { State = WorkflowState.Stopped; StopReason = reason; Save(); }
@@ -99,8 +102,11 @@ public sealed class OrchestrationEngine
             USER_REQUEST:
             {TaskText}
             """,
+
         AgentRole.Planner => $"""
-            あなたはPlannerです。司令塔の結果から実装計画だけを作ってください。
+            あなたはPlannerです。司令塔の結果と実際のWORKSPACE_CONTEXTを読み、実装計画だけを作ってください。
+            必ず実在するファイル名・クラス・UI要素を根拠に変更対象を選んでください。
+            既存アプリの機能変更依頼なのに、無関係なtxtやダミーファイルを追加して代用してはいけません。
             変更対象、追加ファイル、テスト方法、リスクを具体化してください。コード全文は書かないでください。
             最後に PLAN_DONE と書いてください。
 
@@ -109,10 +115,16 @@ public sealed class OrchestrationEngine
 
             MANAGER_RESULT:
             {GetAnswer(AgentRole.Manager)}
+
+            WORKSPACE_CONTEXT:
+            {WorkspaceContext}
             """,
+
         AgentRole.Coder => $"""
-            あなたはCoderです。計画に従い、workspace内へ適用できる変更を出力してください。
+            あなたはCoderです。計画と実際のWORKSPACE_CONTEXTに従い、workspace内へ適用できる本物の変更を出力してください。
             CREATE/MODIFYのみ使用可能です。.git/bin/objやworkspace外は変更禁止です。
+            既存アプリのUIや動作を変更する依頼では、WORKSPACE_CONTEXTから該当する既存ソースを特定してMODIFYしてください。
+            無関係なtxt、説明用ファイル、ダミーファイルを作って実装の代わりにしてはいけません。
             変更する各ファイルを必ず次の厳密な形式で、ファイル全文として出力してください。
 
             FILE: relative/path.ext
@@ -133,7 +145,11 @@ public sealed class OrchestrationEngine
 
             REVIEW_FEEDBACK:
             {GetAnswer(AgentRole.Reviewer)}
+
+            WORKSPACE_CONTEXT:
+            {WorkspaceContext}
             """,
+
         AgentRole.Reviewer => $"""
             あなたはReviewerです。Coderの変更内容とローカル実行結果を厳しくレビューしてください。
             ビルド失敗、要求未達、危険な変更があれば先頭行を FAIL にしてください。
