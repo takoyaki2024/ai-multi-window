@@ -14,8 +14,10 @@ public sealed class OrchestrationEngine
     public WorkflowState State { get; set; } = WorkflowState.Idle;
     public AgentRole CurrentRole { get; set; } = AgentRole.Manager;
     public int AiCalls { get; set; }
+    public int SendAttempts { get; set; }
     public int FixAttempts { get; set; }
     public int MaxAiCalls { get; set; } = 10;
+    public int MaxSendAttempts { get; set; } = 16;
     public int MaxFixAttempts { get; set; } = 3;
     public int DuplicateLimit { get; set; } = 2;
     public string StopReason { get; set; } = string.Empty;
@@ -23,7 +25,9 @@ public sealed class OrchestrationEngine
     public string LastAnswerHash { get; set; } = string.Empty;
     public int DuplicateCount { get; set; }
     public string ExecutionResult { get; set; } = string.Empty;
+    public bool LastExecutionSucceeded { get; set; }
     public string WorkspaceContext { get; set; } = string.Empty;
+    public string CoderWorkspaceContext { get; set; } = string.Empty;
 
     private static string CheckpointDirectory => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AiMultiWindow");
     private static string CheckpointPath => Path.Combine(CheckpointDirectory, "orchestrator-checkpoint.json");
@@ -41,33 +45,47 @@ public sealed class OrchestrationEngine
     public void Start(string task, string workspaceContext = "")
     {
         TaskText = task.Trim(); State = WorkflowState.Running; CurrentRole = AgentRole.Manager;
-        AiCalls = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
-        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty;
-        WorkspaceContext = workspaceContext; Save();
+        AiCalls = 0; SendAttempts = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
+        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
+        WorkspaceContext = workspaceContext; CoderWorkspaceContext = string.Empty; Save();
     }
 
     public void Reset()
     {
         TaskText = string.Empty; State = WorkflowState.Idle; CurrentRole = AgentRole.Manager;
-        AiCalls = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
-        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty;
-        WorkspaceContext = string.Empty; Save();
+        AiCalls = 0; SendAttempts = 0; FixAttempts = 0; StopReason = string.Empty; Answers.Clear();
+        LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
+        WorkspaceContext = string.Empty; CoderWorkspaceContext = string.Empty; Save();
     }
 
     public void Stop(string reason) { State = WorkflowState.Stopped; StopReason = reason; Save(); }
     public void SetExecutionResult(string value) { ExecutionResult = value; Save(); }
+    public void SetExecutionResult(string value, bool success) { ExecutionResult = value; LastExecutionSucceeded = success; Save(); }
+    public void SetCoderWorkspaceContext(string value) { CoderWorkspaceContext = value; Save(); }
 
-    public bool MarkPromptSent()
+    public bool TryBeginPromptAttempt()
     {
         if (State != WorkflowState.Running) return false;
         if (AiCalls >= MaxAiCalls) { Stop("AI呼び出し上限に達しました"); return false; }
-        AiCalls++; Save(); return true;
+        if (SendAttempts >= MaxSendAttempts) { Stop("送信試行回数の上限に達しました"); return false; }
+        SendAttempts++; Save(); return true;
     }
+
+    public void RecordPromptAccepted() { AiCalls++; Save(); }
 
     public bool RecordAnswer(string answer)
     {
         if (State != WorkflowState.Running || string.IsNullOrWhiteSpace(answer)) return false;
         var normalized = answer.Trim();
+        var markerValid = CurrentRole switch
+        {
+            AgentRole.Manager => ContainsMarker(normalized, "MANAGER_DONE"),
+            AgentRole.Planner => ContainsMarker(normalized, "PLAN_DONE"),
+            AgentRole.Coder => ContainsMarker(normalized, "CODER_DONE"),
+            AgentRole.Reviewer => ReviewerVerdict(normalized) != ReviewVerdict.Unknown,
+            _ => false
+        };
+        if (!markerValid) { Stop($"{CurrentRole} の回答形式を確認できませんでした"); return false; }
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
         DuplicateCount = hash == LastAnswerHash ? DuplicateCount + 1 : 0;
         LastAnswerHash = hash;
@@ -80,7 +98,12 @@ public sealed class OrchestrationEngine
             case AgentRole.Planner: CurrentRole = AgentRole.Coder; break;
             case AgentRole.Coder: CurrentRole = AgentRole.Reviewer; break;
             case AgentRole.Reviewer:
-                if (ReviewerRequestsFix(normalized))
+                if (ReviewerVerdict(normalized) == ReviewVerdict.Pass && !LastExecutionSucceeded)
+                {
+                    Stop("ローカル検証失敗のためReviewer PASSを受理できません");
+                    return false;
+                }
+                if (ReviewerVerdict(normalized) == ReviewVerdict.Fail)
                 {
                     FixAttempts++;
                     if (FixAttempts >= MaxFixAttempts) { Stop("修正回数の上限に達しました"); return false; }
@@ -147,7 +170,7 @@ public sealed class OrchestrationEngine
             {GetAnswer(AgentRole.Reviewer)}
 
             WORKSPACE_CONTEXT:
-            {WorkspaceContext}
+            {CoderWorkspaceContext}
             """,
 
         AgentRole.Reviewer => $"""
@@ -184,9 +207,17 @@ public sealed class OrchestrationEngine
         catch { }
     }
 
-    private static bool ReviewerRequestsFix(string answer)
+    private static bool ContainsMarker(string answer, string marker) =>
+        answer.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Any(line => string.Equals(line.Trim(), marker, StringComparison.OrdinalIgnoreCase));
+
+    private static ReviewVerdict ReviewerVerdict(string answer)
     {
         var firstLine = answer.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? string.Empty;
-        return firstLine.StartsWith("FAIL", StringComparison.OrdinalIgnoreCase);
+        if (string.Equals(firstLine, "PASS", StringComparison.OrdinalIgnoreCase)) return ReviewVerdict.Pass;
+        if (string.Equals(firstLine, "FAIL", StringComparison.OrdinalIgnoreCase)) return ReviewVerdict.Fail;
+        return ReviewVerdict.Unknown;
     }
+
+    private enum ReviewVerdict { Unknown, Pass, Fail }
 }

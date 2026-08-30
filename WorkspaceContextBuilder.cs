@@ -7,6 +7,7 @@ public static class WorkspaceContextBuilder
     private const int MaxContextChars = 32_000;
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
+    private const int MaxCoderFiles = 12;
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -14,7 +15,10 @@ public static class WorkspaceContextBuilder
         ".md", ".ps1", ".bat", ".cmd", ".yml", ".yaml"
     };
 
-    public static async Task<string> BuildAsync(string workspaceRoot, CancellationToken cancellationToken = default)
+    public static Task<string> BuildAsync(string workspaceRoot, CancellationToken cancellationToken = default) =>
+        BuildPlannerAsync(workspaceRoot, cancellationToken);
+
+    public static async Task<string> BuildPlannerAsync(string workspaceRoot, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(workspaceRoot) || !Directory.Exists(workspaceRoot))
             return "WORKSPACE_CONTEXT_ERROR: Workspaceが存在しません。";
@@ -35,7 +39,7 @@ public static class WorkspaceContextBuilder
             output.AppendLine(Path.GetRelativePath(root, file.FullName).Replace('\\', '/'));
 
         output.AppendLine();
-        output.AppendLine("WORKSPACE_FILE_CONTENTS:");
+        output.AppendLine("WORKSPACE_OVERVIEW:");
 
         foreach (var file in files)
         {
@@ -53,15 +57,19 @@ public static class WorkspaceContextBuilder
             }
 
             var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
+            // Planner receives small project/configuration files and a tree. Large source files are
+            // deliberately omitted instead of truncated so no partial file can be mistaken for a full file.
             if (content.Length > MaxSingleFileChars)
-                content = content[..MaxSingleFileChars] + "\n[TRUNCATED]";
+            {
+                output.AppendLine($"OMITTED_LARGE_FILE: {relative} ({content.Length} chars)");
+                continue;
+            }
 
             var block = $"\n===== FILE: {relative} =====\n{content}\n===== END FILE =====\n";
             var remaining = MaxContextChars - output.Length;
             if (block.Length > remaining)
             {
-                if (remaining > 300)
-                    output.Append(block[..remaining]);
+                output.AppendLine($"OMITTED_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial.");
                 break;
             }
 
@@ -73,6 +81,36 @@ public static class WorkspaceContextBuilder
         return output.ToString();
     }
 
+    public static async Task<string> BuildCoderAsync(string workspaceRoot, string plannerAnswer, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(workspaceRoot) || !Directory.Exists(workspaceRoot))
+            return "WORKSPACE_CONTEXT_ERROR: Workspaceが存在しません。";
+        var root = Path.GetFullPath(workspaceRoot);
+        var all = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Where(path => !IsIgnored(root, path))
+            .Select(path => new FileInfo(path))
+            .Where(info => TextExtensions.Contains(info.Extension))
+            .ToList();
+        var mentioned = all.Where(f => plannerAnswer.Contains(Path.GetRelativePath(root, f.FullName).Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
+                                      || plannerAnswer.Contains(f.Name, StringComparison.OrdinalIgnoreCase));
+        var selected = mentioned.Concat(all.Where(f => f.Extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)))
+            .DistinctBy(f => f.FullName, StringComparer.OrdinalIgnoreCase).OrderBy(f => Priority(root, f)).Take(MaxCoderFiles).ToList();
+        var output = new StringBuilder("CODER_WORKSPACE_FILES (complete files only):\n");
+        foreach (var file in selected)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var content = await File.ReadAllTextAsync(file.FullName, Encoding.UTF8, cancellationToken);
+            var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
+            if (content.Length > MaxSingleFileChars || output.Length + content.Length > MaxContextChars)
+            {
+                output.AppendLine($"OMITTED_TOO_LARGE: {relative} ({content.Length} chars). Do not modify without full content.");
+                continue;
+            }
+            output.AppendLine($"\n===== COMPLETE FILE: {relative} =====\n{content}\n===== END COMPLETE FILE =====");
+        }
+        return output.ToString();
+    }
+
     private static bool IsIgnored(string root, string path)
     {
         var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
@@ -80,6 +118,7 @@ public static class WorkspaceContextBuilder
             || relative.StartsWith("bin/", StringComparison.OrdinalIgnoreCase)
             || relative.StartsWith("obj/", StringComparison.OrdinalIgnoreCase)
             || relative.StartsWith("workspace/", StringComparison.OrdinalIgnoreCase)
+            || relative.StartsWith(".ai-multi-window/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/bin/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/obj/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/.git/", StringComparison.OrdinalIgnoreCase);
