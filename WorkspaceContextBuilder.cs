@@ -4,14 +4,14 @@ namespace AiMultiWindow;
 
 public static class WorkspaceContextBuilder
 {
-    private const int MaxContextChars = 120_000;
-    private const int MaxSingleFileChars = 30_000;
-    private const int MaxFiles = 80;
+    private const int MaxContextChars = 32_000;
+    private const int MaxSingleFileChars = 18_000;
+    private const int MaxFiles = 40;
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".cs", ".xaml", ".csproj", ".props", ".targets", ".json", ".xml",
-        ".md", ".txt", ".ps1", ".bat", ".cmd", ".yml", ".yaml"
+        ".md", ".ps1", ".bat", ".cmd", ".yml", ".yaml"
     };
 
     public static async Task<string> BuildAsync(string workspaceRoot, CancellationToken cancellationToken = default)
@@ -24,7 +24,7 @@ public static class WorkspaceContextBuilder
             .Where(path => !IsIgnored(root, path))
             .Select(path => new FileInfo(path))
             .Where(info => TextExtensions.Contains(info.Extension))
-            .OrderBy(info => Priority(info.Extension))
+            .OrderBy(info => Priority(root, info))
             .ThenBy(info => Path.GetRelativePath(root, info.FullName), StringComparer.OrdinalIgnoreCase)
             .Take(MaxFiles)
             .ToList();
@@ -60,7 +60,7 @@ public static class WorkspaceContextBuilder
             var remaining = MaxContextChars - output.Length;
             if (block.Length > remaining)
             {
-                if (remaining > 100)
+                if (remaining > 300)
                     output.Append(block[..remaining]);
                 break;
             }
@@ -68,6 +68,8 @@ public static class WorkspaceContextBuilder
             output.Append(block);
         }
 
+        output.AppendLine();
+        output.AppendLine($"WORKSPACE_CONTEXT_CHARS: {output.Length}");
         return output.ToString();
     }
 
@@ -77,18 +79,23 @@ public static class WorkspaceContextBuilder
         return relative.StartsWith(".git/", StringComparison.OrdinalIgnoreCase)
             || relative.StartsWith("bin/", StringComparison.OrdinalIgnoreCase)
             || relative.StartsWith("obj/", StringComparison.OrdinalIgnoreCase)
+            || relative.StartsWith("workspace/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/bin/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/obj/", StringComparison.OrdinalIgnoreCase)
             || relative.Contains("/.git/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static int Priority(string extension) => extension.ToLowerInvariant() switch
+    private static int Priority(string root, FileInfo info)
     {
-        ".csproj" => 0,
-        ".xaml" => 1,
-        ".cs" => 2,
-        ".json" => 3,
-        ".md" => 4,
-        _ => 5
-    };
+        var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
+
+        if (relative.Equals("MainWindow.xaml", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (relative.Equals("MainWindow.xaml.cs", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (info.Extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)) return 2;
+        if (info.Extension.Equals(".xaml", StringComparison.OrdinalIgnoreCase)) return 3;
+        if (info.Extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)) return 4;
+        if (info.Extension.Equals(".json", StringComparison.OrdinalIgnoreCase)) return 5;
+        if (info.Extension.Equals(".md", StringComparison.OrdinalIgnoreCase)) return 8;
+        return 7;
+    }
 }
