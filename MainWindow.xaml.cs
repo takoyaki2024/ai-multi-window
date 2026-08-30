@@ -92,18 +92,21 @@ public partial class MainWindow : Window
     {
         var task = TaskTextBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(task)) { StatusText.Text = "依頼を入力してください"; return; }
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
         _orchestrator.Start(task); ApplyLayout(4); UpdateOrchestratorUi(); await SendCurrentStepAsync();
     }
 
-    private void StopOrchestration_Click(object sender, RoutedEventArgs e)
+    private async void StopOrchestration_Click(object sender, RoutedEventArgs e)
     {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
         if (_orchestrator.State == WorkflowState.Running) _orchestrator.Stop("ユーザーが停止しました");
-        UpdateOrchestratorUi(); StatusText.Text = "司令塔を停止しました";
+        UpdateOrchestratorUi(); StatusText.Text = "司令塔を停止しました。未確定変更はロールバックしました。";
     }
 
-    private void ResetOrchestration_Click(object sender, RoutedEventArgs e)
+    private async void ResetOrchestration_Click(object sender, RoutedEventArgs e)
     {
-        _orchestrator.Reset(); TaskTextBox.Clear(); UpdateOrchestratorUi(); StatusText.Text = "司令塔をリセットしました";
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        _orchestrator.Reset(); TaskTextBox.Clear(); UpdateOrchestratorUi(); StatusText.Text = "司令塔をリセットしました。未確定変更はロールバックしました。";
     }
 
     private async void CaptureAndAdvance_Click(object sender, RoutedEventArgs e)
@@ -125,11 +128,32 @@ public partial class MainWindow : Window
                 var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
                 _orchestrator.SetExecutionResult(executionText);
                 if (!execution.Success)
-                    StatusText.Text = "ローカル適用/ビルドに失敗。Reviewerへ結果を渡します。";
+                    StatusText.Text = "ローカル適用/ビルドに失敗。変更をロールバックし、Reviewerへ結果を渡します。";
             }
 
-            var advanced = _orchestrator.RecordAnswer(answer); UpdateOrchestratorUi();
-            if (_orchestrator.State == WorkflowState.Success) { StatusText.Text = "レビューPASS — ワークフロー完了"; return; }
+            var advanced = _orchestrator.RecordAnswer(answer);
+
+            if (role == AgentRole.Reviewer)
+            {
+                if (_orchestrator.State == WorkflowState.Success)
+                {
+                    var commitResult = WorkspaceExecutor.CommitPending();
+                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + commitResult);
+                }
+                else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                {
+                    var rollbackResult = await WorkspaceExecutor.RollbackPendingAsync();
+                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + rollbackResult);
+                    StatusText.Text = "Reviewer FAIL — 今回の変更をロールバックしてCoderへ戻します。";
+                }
+                else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
+                {
+                    await WorkspaceExecutor.RollbackPendingAsync();
+                }
+            }
+
+            UpdateOrchestratorUi();
+            if (_orchestrator.State == WorkflowState.Success) { StatusText.Text = "レビューPASS — ローカル変更を確定してワークフロー完了"; return; }
             if (_orchestrator.State == WorkflowState.Stopped) { StatusText.Text = _orchestrator.StopReason; return; }
             if (!advanced) { StatusText.Text = "回答を処理できなかったため停止しました"; return; }
             await SendCurrentStepAsync();
