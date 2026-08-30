@@ -8,6 +8,8 @@ public static class WorkspaceContextBuilder
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
     private const int MaxCoderFiles = 12;
+    private const int MaxCoderContextChars = 120_000;
+    private const int MaxCoderSingleFileChars = 80_000;
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -101,13 +103,22 @@ public static class WorkspaceContextBuilder
             cancellationToken.ThrowIfCancellationRequested();
             var content = await File.ReadAllTextAsync(file.FullName, Encoding.UTF8, cancellationToken);
             var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-            if (content.Length > MaxSingleFileChars || output.Length + content.Length > MaxContextChars)
+            if (content.Length > MaxCoderSingleFileChars)
             {
-                output.AppendLine($"OMITTED_TOO_LARGE: {relative} ({content.Length} chars). Do not modify without full content.");
+                output.AppendLine($"OMITTED_TOO_LARGE: {relative} ({content.Length} chars). File exceeds coder safety limit; do not modify without full content.");
                 continue;
             }
-            output.AppendLine($"\n===== COMPLETE FILE: {relative} =====\n{content}\n===== END COMPLETE FILE =====");
+
+            var block = $"\n===== COMPLETE FILE: {relative} =====\n{content}\n===== END COMPLETE FILE =====\n";
+            if (output.Length + block.Length > MaxCoderContextChars)
+            {
+                output.AppendLine($"OMITTED_CODER_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial.");
+                continue;
+            }
+
+            output.Append(block);
         }
+        output.AppendLine($"CODER_CONTEXT_CHARS: {output.Length}");
         return output.ToString();
     }
 
