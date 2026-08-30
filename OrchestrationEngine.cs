@@ -180,13 +180,6 @@ public sealed class OrchestrationEngine
                 if (!LastExecutionSucceeded)
                 {
                     FixAttempts++;
-                    if (CoderStepIndex > 0)
-                    {
-                        CoderStepIndex = 0;
-                        CoderStepAnswers.Clear();
-                        SuccessfulExecutionResults.Clear();
-                        WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_TRANSACTION_RESTART", "A later step failed; prior pending changes were rolled back, restarting from step 1.");
-                    }
                     WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_RETRY_LOCAL_VERIFICATION_FAILED", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; coderStep={CoderStepNumber}/{CoderStepCount}");
                     WorkflowDiagnostics.Snapshot(this, "CODER_RETRY_LOCAL_VERIFICATION_FAILED", Tail(ExecutionResult, 3500));
                     if (FixAttempts >= MaxFixAttempts)
@@ -202,10 +195,19 @@ public sealed class OrchestrationEngine
                     FixAttempts = 0;
                     if (CoderStepIndex + 1 < CoderStepCount)
                     {
+                        var commit = WorkspaceExecutor.CommitPending();
+                        ExecutionResult += Environment.NewLine + commit;
+                        if (commit.Contains("FAILED", StringComparison.Ordinal))
+                        {
+                            Stop(commit);
+                            return false;
+                        }
+
+                        WorkflowDiagnostics.Event("3 Coder", "step", "CODER_STEP_COMMITTED", $"step={CoderStepNumber}/{CoderStepCount}; {commit}");
                         CoderStepIndex++;
                         CurrentRole = AgentRole.Coder;
                         WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_STEP_TO_NEXT", $"nextStep={CoderStepNumber}/{CoderStepCount}; completedAnswers={CoderStepAnswers.Count}");
-                        WorkflowDiagnostics.Snapshot(this, "CODER_STEP_TO_NEXT", $"Next Coder step {CoderStepNumber}/{CoderStepCount}. Reviewer waits until all steps pass.");
+                        WorkflowDiagnostics.Snapshot(this, "CODER_STEP_TO_NEXT", $"Verified previous step was committed locally. Next Coder step {CoderStepNumber}/{CoderStepCount}.");
                     }
                     else
                     {
@@ -226,10 +228,8 @@ public sealed class OrchestrationEngine
                 if (ReviewerVerdict(normalized) == ReviewVerdict.Fail)
                 {
                     FixAttempts++;
-                    CoderStepIndex = 0;
-                    CoderStepAnswers.Clear();
-                    SuccessfulExecutionResults.Clear();
-                    WorkflowDiagnostics.Event("4 Reviewer", "transition", "REVIEWER_FAIL_TO_CODER", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; restartStep=1/{CoderStepCount}");
+                    CoderStepIndex = Math.Max(0, CoderStepCount - 1);
+                    WorkflowDiagnostics.Event("4 Reviewer", "transition", "REVIEWER_FAIL_TO_CODER", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; repairStep={CoderStepNumber}/{CoderStepCount}");
                     if (FixAttempts >= MaxFixAttempts) { Stop("修正回数の上限に達しました"); return false; }
                     CurrentRole = AgentRole.Coder;
                 }
