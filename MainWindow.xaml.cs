@@ -92,8 +92,22 @@ public partial class MainWindow : Window
     {
         var task = TaskTextBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(task)) { StatusText.Text = "依頼を入力してください"; return; }
+
+        var workspace = WorkspaceTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace))
+        {
+            StatusText.Text = "有効なWorkspaceを指定してください";
+            return;
+        }
+
         if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
-        _orchestrator.Start(task); ApplyLayout(4); UpdateOrchestratorUi(); await SendCurrentStepAsync();
+
+        StatusText.Text = "Workspaceの実コードを読み込み中...";
+        var workspaceContext = await WorkspaceContextBuilder.BuildAsync(workspace);
+        _orchestrator.Start(task, workspaceContext);
+        ApplyLayout(4);
+        UpdateOrchestratorUi();
+        await SendCurrentStepAsync();
     }
 
     private async void StopOrchestration_Click(object sender, RoutedEventArgs e)
