@@ -3,7 +3,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Threading;
 
 namespace AiMultiWindow;
 
@@ -11,463 +10,204 @@ public partial class MainWindow : Window
 {
     private readonly AppSettings _settings;
     private readonly BrowserPane[] _panes;
-    private readonly OrchestrationEngine _orchestrator;
-    private int _layoutCount;
     private bool _isFullscreen;
     private WindowStyle _previousWindowStyle;
     private WindowState _previousWindowState;
-    private readonly SemaphoreSlim _workflowLock = new(1, 1);
-    private CancellationTokenSource? _workflowCancellation;
-    private readonly DispatcherTimer _activityTimer = new() { Interval = TimeSpan.FromSeconds(1) };
-    private DateTime _activityStartedAt;
-    private string _activityRole = "-";
-    private string _activityStage = "待機中";
-    private int _activityTimeoutSeconds;
-    private bool _activityActive;
 
     public MainWindow()
     {
         InitializeComponent();
         _settings = AppSettings.Load();
-        _orchestrator = OrchestrationEngine.Load();
-        _layoutCount = _settings.LayoutCount;
-        _panes = new BrowserPane[4];
+        _panes = new BrowserPane[3];
 
-        for (var i = 0; i < 4; i++)
+        for (var i = 0; i < _panes.Length; i++)
         {
             var index = i;
             _panes[i] = new BrowserPane(_settings.Urls[i], i);
-            _panes[i].UrlChanged += url => { _settings.Urls[index] = url; _settings.Save(); };
+            _panes[i].UrlChanged += url =>
+            {
+                _settings.Urls[index] = url;
+                _settings.Save();
+            };
         }
 
-        _activityTimer.Tick += (_, _) => UpdateActivityUi();
-        _activityTimer.Start();
-
-        Loaded += (_, _) =>
-        {
-            ApplyLayout(_layoutCount);
-            TaskTextBox.Text = _orchestrator.TaskText;
-            WorkspaceTextBox.Text = Environment.CurrentDirectory;
-            UpdateOrchestratorUi();
-            UpdateActivityUi();
-        };
+        Loaded += (_, _) => BuildThreeColumnLayout();
         Closing += MainWindow_Closing;
     }
 
-    private void LayoutButton_Click(object sender, RoutedEventArgs e)
+    private void BuildThreeColumnLayout()
     {
-        if (sender is Button { Tag: string tag } && int.TryParse(tag, out var count)) ApplyLayout(count);
+        foreach (var pane in _panes)
+            DetachFromParent(pane);
+
+        LayoutHost.Children.Clear();
+        LayoutHost.RowDefinitions.Clear();
+        LayoutHost.ColumnDefinitions.Clear();
+
+        LayoutHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        LayoutHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
+        LayoutHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        LayoutHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
+        LayoutHost.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        AddPaneCard(0, 0);
+        AddSplitter(1);
+        AddPaneCard(1, 2);
+        AddSplitter(3);
+        AddPaneCard(2, 4);
+
+        StatusText.Text = "3画面 — 境界線をドラッグして幅を変更できます";
     }
 
-    private void ApplyLayout(int count)
+    private void AddPaneCard(int paneIndex, int column)
     {
-        count = Math.Clamp(count, 1, 4); _layoutCount = count; _settings.LayoutCount = count;
-        foreach (var pane in _panes) DetachFromParent(pane);
-        LayoutHost.Children.Clear(); LayoutHost.RowDefinitions.Clear(); LayoutHost.ColumnDefinitions.Clear();
-        FrameworkElement content = count switch { 1 => BuildSingle(), 2 => BuildTwoColumns(), 3 => BuildThreePane(), _ => BuildFourPane() };
-        LayoutHost.Children.Add(content); UpdateLayoutButtons();
-        StatusText.Text = $"{count}分割 — 境界線をドラッグしてサイズ変更できます"; _settings.Save();
-    }
+        var card = new Grid { Background = Brushes.White };
+        card.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        card.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-    private FrameworkElement BuildSingle() { var grid = CreateContainer(); grid.Children.Add(_panes[0]); return grid; }
-
-    private FrameworkElement BuildTwoColumns()
-    {
-        var grid = CreateContainer();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        AddAt(grid, _panes[0], 0, 0); var splitter = VerticalSplitter(); Grid.SetColumn(splitter, 1); grid.Children.Add(splitter); AddAt(grid, _panes[1], 0, 2); return grid;
-    }
-
-    private FrameworkElement BuildThreePane()
-    {
-        var grid = CreateContainer();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        AddAt(grid, _panes[0], 0, 0); var vertical = VerticalSplitter(); Grid.SetColumn(vertical, 1); grid.Children.Add(vertical);
-        var right = CreateContainer(); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) }); right.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        AddAt(right, _panes[1], 0, 0); var horizontal = HorizontalSplitter(); Grid.SetRow(horizontal, 1); right.Children.Add(horizontal); AddAt(right, _panes[2], 2, 0); Grid.SetColumn(right, 2); grid.Children.Add(right); return grid;
-    }
-
-    private FrameworkElement BuildFourPane()
-    {
-        var grid = CreateContainer();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) }); grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) }); grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) }); grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        AddAt(grid, _panes[0], 0, 0); AddAt(grid, _panes[1], 0, 2); AddAt(grid, _panes[2], 2, 0); AddAt(grid, _panes[3], 2, 2);
-        var vertical = VerticalSplitter(); Grid.SetColumn(vertical, 1); Grid.SetRowSpan(vertical, 3); grid.Children.Add(vertical);
-        var horizontal = HorizontalSplitter(); Grid.SetRow(horizontal, 1); Grid.SetColumnSpan(horizontal, 3); grid.Children.Add(horizontal); return grid;
-    }
-
-    private async void StartOrchestration_Click(object sender, RoutedEventArgs e)
-    {
-        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
-        try
+        var header = new Border
         {
-        _workflowCancellation?.Cancel();
-        _workflowCancellation?.Dispose();
-        _workflowCancellation = new CancellationTokenSource();
-        var task = TaskTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(task)) { StatusText.Text = "依頼を入力してください"; return; }
+            Background = new SolidColorBrush(Color.FromRgb(249, 250, 251)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(209, 213, 219)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(8, 6, 8, 6)
+        };
 
-        var workspace = WorkspaceTextBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(workspace) || !Directory.Exists(workspace))
+        var headerGrid = new Grid();
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var title = new TextBlock
         {
-            StatusText.Text = "有効なWorkspaceを指定してください";
+            Text = $"Chat {paneIndex + 1}",
+            FontWeight = FontWeights.Bold,
+            FontSize = 15,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var pasteButton = new Button
+        {
+            Content = "共通入力を貼付",
+            Tag = paneIndex,
+            Height = 30,
+            Padding = new Thickness(10, 0, 10, 0),
+            ToolTip = $"共通入力をChat {paneIndex + 1}へ入れます。送信はしません。"
+        };
+        pasteButton.Click += PasteToPane_Click;
+
+        Grid.SetColumn(title, 0);
+        Grid.SetColumn(pasteButton, 1);
+        headerGrid.Children.Add(title);
+        headerGrid.Children.Add(pasteButton);
+        header.Child = headerGrid;
+
+        Grid.SetRow(header, 0);
+        Grid.SetRow(_panes[paneIndex], 1);
+        card.Children.Add(header);
+        card.Children.Add(_panes[paneIndex]);
+
+        Grid.SetColumn(card, column);
+        LayoutHost.Children.Add(card);
+    }
+
+    private void AddSplitter(int column)
+    {
+        var splitter = new GridSplitter
+        {
+            Width = 6,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)),
+            ResizeDirection = GridResizeDirection.Columns,
+            ResizeBehavior = GridResizeBehavior.PreviousAndNext,
+            ShowsPreview = true
+        };
+        Grid.SetColumn(splitter, column);
+        LayoutHost.Children.Add(splitter);
+    }
+
+    private void PasteAll_Click(object sender, RoutedEventArgs e)
+    {
+        var text = SharedPromptTextBox.Text;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            StatusText.Text = "共通入力が空です";
+            SharedPromptTextBox.Focus();
             return;
         }
 
-        BeginActivity(null, "Workspace読み込み・復旧確認", 30);
-        await WorkspaceExecutor.RecoverPendingAsync(workspace);
-        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        foreach (var pane in _panes)
+            pane.SetPromptText(text);
 
-        StatusText.Text = "Workspaceの実コードを読み込み中...";
-        var workspaceContext = await WorkspaceContextBuilder.BuildAsync(workspace);
-        _orchestrator.Start(task, workspaceContext);
-        ApplyLayout(4);
-        UpdateOrchestratorUi();
-        await RunAutomaticWorkflowAsync(_workflowCancellation.Token);
-        }
-        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; EndActivity("キャンセル", false); }
-        finally { _workflowLock.Release(); }
+        StatusText.Text = "共通入力をChat 1・2・3へ貼り付けました（未送信）";
     }
 
-    private async void StopOrchestration_Click(object sender, RoutedEventArgs e)
+    private void PasteToPane_Click(object sender, RoutedEventArgs e)
     {
-        _workflowCancellation?.Cancel();
-        await _workflowLock.WaitAsync();
-        try
+        if (sender is not Button { Tag: int paneIndex } || paneIndex < 0 || paneIndex >= _panes.Length)
+            return;
+
+        var text = SharedPromptTextBox.Text;
+        if (string.IsNullOrWhiteSpace(text))
         {
-        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
-        if (_orchestrator.State == WorkflowState.Running) _orchestrator.Stop("ユーザーが停止しました");
-        UpdateOrchestratorUi(); StatusText.Text = "司令塔を停止しました。未確定変更はロールバックしました。";
-        EndActivity("停止", false);
-        }
-        finally { _workflowLock.Release(); }
-    }
-
-    private async void ResetOrchestration_Click(object sender, RoutedEventArgs e)
-    {
-        _workflowCancellation?.Cancel();
-        await _workflowLock.WaitAsync();
-        try
-        {
-        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
-        _orchestrator.Reset(); TaskTextBox.Clear(); UpdateOrchestratorUi(); StatusText.Text = "司令塔をリセットしました。未確定変更はロールバックしました。";
-        EndActivity("待機中", true);
-        }
-        finally { _workflowLock.Release(); }
-    }
-
-    private async void CaptureAndAdvance_Click(object sender, RoutedEventArgs e)
-    {
-        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
-        var cancellationToken = _workflowCancellation?.Token ?? CancellationToken.None;
-        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "実行中のタスクがありません"; _workflowLock.Release(); return; }
-        var role = _orchestrator.CurrentRole; var pane = _panes[(int)role];
-        CaptureNextButton.IsEnabled = false; CaptureNextButton.Content = "回答取得中..."; StatusText.Text = $"{role} の回答を取得中...";
-        BeginActivity(role, "回答取得中", 120);
-
-        try
-        {
-            var answer = await pane.GetLatestAnswerAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
-            if (!_orchestrator.AnswerMatchesCurrentRole(answer))
-            {
-                var repair = _orchestrator.RecordAnswer(answer);
-                if (repair && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                    await RefreshCurrentCoderContextAsync(cancellationToken);
-                UpdateOrchestratorUi();
-                StatusText.Text = repair ? "Coder出力形式を修復するため同じStepへ戻します。" : _orchestrator.StopReason;
-                EndActivity(repair ? "Coder出力形式repair" : "回答形式不一致", false);
-                if (repair) await SendCurrentStepAsync(cancellationToken);
-                return;
-            }
-
-            if (role == AgentRole.Coder)
-            {
-                var workspace = WorkspaceTextBox.Text.Trim();
-                StatusText.Text = "Coder変更をWorkspaceへ適用してビルド中...";
-                BeginActivity(role, "Workspace適用 / build / test", 120);
-                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(
-                    workspace,
-                    answer,
-                    cancellationToken,
-                    WorkspaceContextBuilder.GetCompleteFilePaths(_orchestrator.CoderWorkspaceContext));
-                var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
-                var executionSucceeded = execution.Success;
-                if (executionSucceeded)
-                {
-                    var commit = WorkspaceExecutor.CommitPending();
-                    executionText += Environment.NewLine + commit;
-                    executionSucceeded = !commit.Contains("FAILED", StringComparison.Ordinal);
-                    if (!executionSucceeded) executionText += Environment.NewLine + await WorkspaceExecutor.RollbackPendingAsync();
-                }
-                _orchestrator.SetExecutionResult(executionText, executionSucceeded);
-                if (!execution.Success)
-                    StatusText.Text = "ローカル適用/ビルドに失敗。現在StepだけをロールバックしてCoderへ戻します。";
-            }
-
-            var advanced = _orchestrator.RecordAnswer(answer);
-
-            if (advanced && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                await RefreshCurrentCoderContextAsync(cancellationToken);
-
-            if (role == AgentRole.Reviewer)
-            {
-                if (_orchestrator.State == WorkflowState.Success)
-                {
-                    // Every verified Coder step is committed before Reviewer is entered.
-                }
-                else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                {
-                    StatusText.Text = "Reviewer FAIL — 確定済みStepを保持し、最終Stepの修正へ戻します。";
-                }
-                else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
-                {
-                    await WorkspaceExecutor.RollbackPendingAsync();
-                }
-            }
-
-            UpdateOrchestratorUi();
-            if (_orchestrator.State == WorkflowState.Success) { StatusText.Text = "レビューPASS — ローカル変更を確定してワークフロー完了"; EndActivity("完了", true); return; }
-            if (_orchestrator.State == WorkflowState.Stopped) { StatusText.Text = _orchestrator.StopReason; EndActivity("停止", false); return; }
-            if (!advanced) { StatusText.Text = "回答を処理できなかったため停止しました"; EndActivity("回答処理失敗", false); return; }
-            await SendCurrentStepAsync(cancellationToken);
-        }
-        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; EndActivity("キャンセル", false); }
-        finally
-        {
-            CaptureNextButton.Content = "回答取得 → 次工程";
-            CaptureNextButton.IsEnabled = _orchestrator.State == WorkflowState.Running;
-            _workflowLock.Release();
-        }
-    }
-
-    private async void ResendCurrent_Click(object sender, RoutedEventArgs e)
-    {
-        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
-        try
-        {
-        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "再送できる実行中タスクがありません"; return; }
-        await RunAutomaticWorkflowAsync(_workflowCancellation?.Token ?? CancellationToken.None);
-        }
-        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; EndActivity("キャンセル", false); }
-        finally { _workflowLock.Release(); }
-    }
-
-    private void ChatGptMode_Click(object sender, RoutedEventArgs e)
-    {
-        const string chatGptUrl = "https://chatgpt.com/";
-        for (var i = 0; i < _panes.Length; i++) { _panes[i].HomeUrl = chatGptUrl; _panes[i].NavigateHome(); _settings.Urls[i] = chatGptUrl; }
-        _settings.Save(); ApplyLayout(4); StatusText.Text = "4ペインを独立ChatGPTプロファイルに設定しました";
-    }
-
-    private async Task<bool> SendCurrentStepAsync(CancellationToken cancellationToken)
-    {
-        if (_orchestrator.State != WorkflowState.Running) return false;
-        if (_orchestrator.AwaitingResponse)
-        {
-            var awaitingPane = _panes[(int)_orchestrator.AwaitingRole];
-            if (awaitingPane.HasPendingWorkflowResponse)
-            {
-                WorkflowDiagnostics.Event($"{(int)_orchestrator.AwaitingRole + 1} {_orchestrator.AwaitingRole}", "send", "PENDING_RESPONSE_RESUMED");
-                return true;
-            }
-            _orchestrator.AbandonAwaitingResponse("WebViewに対応する回答待ち情報がないため、明示的な再開時に再送可能化");
-        }
-        if (!_orchestrator.TryBeginPromptAttempt()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; EndActivity("送信上限で停止", false); return false; }
-        var role = _orchestrator.CurrentRole; var pane = _panes[(int)role]; var prompt = _orchestrator.BuildCurrentPrompt();
-        StatusText.Text = $"{role} へ送信中...";
-        var sendTimeout = prompt.Length >= 20_000 ? 120 : 60;
-        BeginActivity(role, $"プロンプト入力・送信中 ({prompt.Length:N0}文字)", sendTimeout);
-
-        var sent = await pane.SendMessageAsync(prompt, cancellationToken);
-        if (sent) _orchestrator.RecordPromptAccepted();
-
-        StatusText.Text = sent
-            ? $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。"
-            : $"{role} への自動送信に失敗しました。状態を確認して再送してください。";
-        if (sent) BeginActivity(role, "ChatGPT回答待ち", 120);
-        else EndActivity("自動送信失敗", false);
-        UpdateOrchestratorUi();
-        return sent;
-    }
-
-    private async Task RunAutomaticWorkflowAsync(CancellationToken cancellationToken)
-    {
-        while (_orchestrator.State == WorkflowState.Running)
-        {
-            var sent = await SendCurrentStepAsync(cancellationToken);
-            if (_orchestrator.State != WorkflowState.Running) return;
-            var role = _orchestrator.CurrentRole;
-            if (!sent) return; // Leave the workflow resumable for an explicit retry.
-
-            StatusText.Text = $"{role} の回答完了を待機中...";
-            BeginActivity(role, "ChatGPT回答生成・完了待ち", 120);
-            var answer = await _panes[(int)role].GetLatestAnswerAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
-            if (!_orchestrator.AnswerMatchesCurrentRole(answer))
-            {
-                var repair = _orchestrator.RecordAnswer(answer);
-                if (repair && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                    await RefreshCurrentCoderContextAsync(cancellationToken);
-                UpdateOrchestratorUi();
-                StatusText.Text = repair ? "Coder出力形式を修復するため同じStepへ戻します。" : _orchestrator.StopReason;
-                EndActivity(repair ? "Coder出力形式repair" : "回答形式不一致", false);
-                if (repair) continue;
-                return;
-            }
-
-            if (role == AgentRole.Coder)
-            {
-                StatusText.Text = "Coder変更を適用し、build/testを実行中...";
-                BeginActivity(role, "Workspace適用 / build / test", 120);
-                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(
-                    WorkspaceTextBox.Text.Trim(),
-                    answer,
-                    cancellationToken,
-                    WorkspaceContextBuilder.GetCompleteFilePaths(_orchestrator.CoderWorkspaceContext));
-                var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
-                var executionSucceeded = execution.Success;
-                if (executionSucceeded)
-                {
-                    var commit = WorkspaceExecutor.CommitPending();
-                    executionText += Environment.NewLine + commit;
-                    executionSucceeded = !commit.Contains("FAILED", StringComparison.Ordinal);
-                    if (!executionSucceeded) executionText += Environment.NewLine + await WorkspaceExecutor.RollbackPendingAsync();
-                }
-                _orchestrator.SetExecutionResult(executionText, executionSucceeded);
-            }
-
-            var advanced = _orchestrator.RecordAnswer(answer);
-            if (advanced && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                await RefreshCurrentCoderContextAsync(cancellationToken);
-            if (role == AgentRole.Reviewer)
-            {
-                if (_orchestrator.State == WorkflowState.Success)
-                {
-                    // Every verified Coder step is committed before Reviewer is entered.
-                }
-                else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
-                {
-                    StatusText.Text = "Reviewer FAIL — 確定済みStepを保持し、最終Stepの修正へ戻します。";
-                }
-                else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
-                    await WorkspaceExecutor.RollbackPendingAsync();
-            }
-            UpdateOrchestratorUi();
-            if (!advanced || _orchestrator.State != WorkflowState.Running)
-            {
-                StatusText.Text = _orchestrator.State == WorkflowState.Success ? "レビューPASS — ローカル変更を確定して完了" : _orchestrator.StopReason;
-                EndActivity(_orchestrator.State == WorkflowState.Success ? "完了" : "停止", _orchestrator.State == WorkflowState.Success);
-                return;
-            }
-        }
-    }
-
-    private async Task RefreshCurrentCoderContextAsync(CancellationToken cancellationToken)
-    {
-        BeginActivity(AgentRole.Coder, $"Coder Step {_orchestrator.CoderStepNumber}/{_orchestrator.CoderStepCount} コンテキスト作成", 30);
-        var context = await WorkspaceContextBuilder.BuildCoderAsync(
-            WorkspaceTextBox.Text.Trim(),
-            _orchestrator.CurrentImplementationStep,
-            cancellationToken);
-        _orchestrator.SetCoderWorkspaceContext(context);
-    }
-
-    private void BeginActivity(AgentRole? role, string stage, int timeoutSeconds)
-    {
-        _activityRole = role is null ? "System" : $"{(int)role.Value + 1} {role.Value}";
-        _activityStage = stage;
-        _activityStartedAt = DateTime.Now;
-        _activityTimeoutSeconds = Math.Max(1, timeoutSeconds);
-        _activityActive = true;
-        UpdateActivityUi();
-    }
-
-    private void EndActivity(string stage, bool success)
-    {
-        _activityStage = stage;
-        _activityActive = false;
-        ActivityHealthText.Text = success ? "⚪ 待機中 / 完了" : "🔴 停止 / 要確認";
-        ActivityStageText.Text = $"処理: {stage}";
-        ActivityHeartbeatText.Text = $"UI heartbeat: {DateTime.Now:HH:mm:ss}";
-        ActivityProgressBar.Value = 0;
-        ActivityTimeoutText.Text = "上限目安: -";
-    }
-
-    private void UpdateActivityUi()
-    {
-        if (!_activityActive)
-        {
-            ActivityRoleText.Text = $"工程: {_activityRole}";
-            ActivityElapsedText.Text = "経過: 00:00";
-            ActivityHeartbeatText.Text = $"UI heartbeat: {DateTime.Now:HH:mm:ss}";
+            StatusText.Text = "共通入力が空です";
+            SharedPromptTextBox.Focus();
             return;
         }
 
-        var elapsed = DateTime.Now - _activityStartedAt;
-        var elapsedSeconds = Math.Max(0, elapsed.TotalSeconds);
-        var ratio = elapsedSeconds / _activityTimeoutSeconds;
-        ActivityHealthText.Text = ratio >= 1.0
-            ? "🔴 上限目安を超過 — 処理待機中"
-            : ratio >= 0.70
-                ? "🟡 時間がかかっています — UIは応答中"
-                : "🟢 動作中 — UI heartbeat正常";
-        ActivityRoleText.Text = $"工程: {_activityRole}";
-        ActivityStageText.Text = $"処理: {_activityStage}";
-        ActivityElapsedText.Text = $"経過: {elapsed:mm\\:ss}";
-        ActivityHeartbeatText.Text = $"UI heartbeat: {DateTime.Now:HH:mm:ss} (1秒更新)";
-        ActivityProgressBar.Maximum = _activityTimeoutSeconds;
-        ActivityProgressBar.Value = Math.Min(elapsedSeconds, _activityTimeoutSeconds);
-        ActivityTimeoutText.Text = $"上限目安: {_activityTimeoutSeconds}秒";
+        _panes[paneIndex].SetPromptText(text, focus: true);
+        StatusText.Text = $"共通入力をChat {paneIndex + 1}へ貼り付けました（未送信）";
     }
 
-    private void UpdateOrchestratorUi()
-    {
-        WorkflowStateText.Text = $"State: {_orchestrator.State}"; CurrentRoleText.Text = $"Role: {_orchestrator.CurrentRole}";
-        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls} (試行 {_orchestrator.SendAttempts})"; FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}"; StopReasonText.Text = _orchestrator.StopReason;
-        var running = _orchestrator.State == WorkflowState.Running; CaptureNextButton.IsEnabled = running; ResendButton.IsEnabled = running;
-    }
+    private void ResetLayout_Click(object sender, RoutedEventArgs e) => BuildThreeColumnLayout();
 
-    private static Grid CreateContainer() => new() { Background = Brushes.Black, ClipToBounds = true };
-    private static void AddAt(Grid grid, UIElement element, int row, int column) { Grid.SetRow(element, row); Grid.SetColumn(element, column); grid.Children.Add(element); }
-    private static GridSplitter VerticalSplitter() => new() { Width = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Columns, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeWE, ShowsPreview = false };
-    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeNS, ShowsPreview = false };
-    private static void DetachFromParent(UIElement element) { if (element is FrameworkElement { Parent: Panel panel }) panel.Children.Remove(element); }
-
-    private void UpdateLayoutButtons()
-    {
-        var buttons = new[] { Layout1Button, Layout2Button, Layout3Button, Layout4Button };
-        for (var i = 0; i < buttons.Length; i++) buttons[i].FontWeight = i + 1 == _layoutCount ? FontWeights.Bold : FontWeights.Normal;
-    }
-
-    private void ResetLayout_Click(object sender, RoutedEventArgs e) => ApplyLayout(_layoutCount);
     private void Fullscreen_Click(object sender, RoutedEventArgs e) => ToggleFullscreen();
-
-    private void ToggleFullscreen()
-    {
-        if (!_isFullscreen) { _previousWindowStyle = WindowStyle; _previousWindowState = WindowState; WindowStyle = WindowStyle.None; WindowState = WindowState.Maximized; _isFullscreen = true; StatusText.Text = "全画面表示 — F11で戻る"; }
-        else { WindowStyle = _previousWindowStyle; WindowState = _previousWindowState; _isFullscreen = false; StatusText.Text = $"{_layoutCount}分割"; }
-    }
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.F11) { ToggleFullscreen(); e.Handled = true; return; }
-        if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        if (e.Key == Key.F11)
         {
-            var count = e.Key switch { Key.D1 or Key.NumPad1 => 1, Key.D2 or Key.NumPad2 => 2, Key.D3 or Key.NumPad3 => 3, Key.D4 or Key.NumPad4 => 4, _ => 0 };
-            if (count > 0) { ApplyLayout(count); e.Handled = true; }
+            ToggleFullscreen();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleFullscreen()
+    {
+        if (!_isFullscreen)
+        {
+            _previousWindowStyle = WindowStyle;
+            _previousWindowState = WindowState;
+            WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Maximized;
+            _isFullscreen = true;
+            StatusText.Text = "全画面表示 — F11で戻ります";
+        }
+        else
+        {
+            WindowStyle = _previousWindowStyle;
+            WindowState = _previousWindowState;
+            _isFullscreen = false;
+            StatusText.Text = "3画面表示";
         }
     }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
-        _activityTimer.Stop();
-        _settings.LayoutCount = _layoutCount; for (var i = 0; i < _panes.Length; i++) _settings.Urls[i] = _panes[i].HomeUrl;
-        _settings.Save(); _orchestrator.Save();
+        for (var i = 0; i < _panes.Length; i++)
+            _settings.Urls[i] = _panes[i].HomeUrl;
+
+        _settings.LayoutCount = 3;
+        _settings.Save();
+    }
+
+    private static void DetachFromParent(UIElement element)
+    {
+        if (element.Parent is Panel panel)
+            panel.Children.Remove(element);
+        else if (element.Parent is Decorator decorator)
+            decorator.Child = null;
+        else if (element.Parent is ContentControl contentControl)
+            contentControl.Content = null;
     }
 }
