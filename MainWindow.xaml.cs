@@ -136,8 +136,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        foreach (var pane in _panes)
-            pane.SetPromptText(text);
+        for (var i = 0; i < _panes.Length; i++)
+            SetPanePromptText(i, text, focus: false);
 
         StatusText.Text = "共通入力をChat 1・2・3へ貼り付けました（未送信）";
     }
@@ -155,8 +155,29 @@ public partial class MainWindow : Window
             return;
         }
 
-        _panes[paneIndex].SetPromptText(text, focus: true);
+        SetPanePromptText(paneIndex, text, focus: true);
         StatusText.Text = $"共通入力をChat {paneIndex + 1}へ貼り付けました（未送信）";
+    }
+
+    private void SetPanePromptText(int paneIndex, string text, bool focus)
+    {
+        var promptBox = _panes[paneIndex]
+            .Children
+            .OfType<Grid>()
+            .Where(grid => Grid.GetRow(grid) == 1)
+            .SelectMany(grid => grid.Children.OfType<TextBox>())
+            .FirstOrDefault();
+
+        if (promptBox is null)
+        {
+            StatusText.Text = $"Chat {paneIndex + 1} の入力欄を見つけられませんでした";
+            return;
+        }
+
+        promptBox.Text = text;
+        promptBox.CaretIndex = promptBox.Text.Length;
+        if (focus)
+            promptBox.Focus();
     }
 
     private void ResetLayout_Click(object sender, RoutedEventArgs e) => BuildThreeColumnLayout();
