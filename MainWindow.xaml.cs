@@ -222,7 +222,7 @@ public partial class MainWindow : Window
     private static Grid CreateContainer() => new() { Background = Brushes.Black, ClipToBounds = true };
     private static void AddAt(Grid grid, UIElement element, int row, int column) { Grid.SetRow(element, row); Grid.SetColumn(element, column); grid.Children.Add(element); }
     private static GridSplitter VerticalSplitter() => new() { Width = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Columns, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeWE, ShowsPreview = false };
-    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeDirection.Rows, Cursor = Cursors.SizeNS, ShowsPreview = false };
+    private static GridSplitter HorizontalSplitter() => new() { Height = 6, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Stretch, Background = new SolidColorBrush(Color.FromRgb(31, 41, 55)), ResizeDirection = GridResizeDirection.Rows, ResizeBehavior = GridResizeBehavior.PreviousAndNext, Cursor = Cursors.SizeNS, ShowsPreview = false };
     private static void DetachFromParent(UIElement element) { if (element is FrameworkElement { Parent: Panel panel }) panel.Children.Remove(element); }
 
     private void UpdateLayoutButtons()
