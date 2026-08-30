@@ -176,10 +176,13 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
             if (!_orchestrator.AnswerMatchesCurrentRole(answer))
             {
-                _orchestrator.RecordAnswer(answer);
+                var repair = _orchestrator.RecordAnswer(answer);
+                if (repair && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                    await RefreshCurrentCoderContextAsync(cancellationToken);
                 UpdateOrchestratorUi();
-                StatusText.Text = _orchestrator.StopReason;
-                EndActivity("回答形式不一致", false);
+                StatusText.Text = repair ? "Coder出力形式を修復するため同じStepへ戻します。" : _orchestrator.StopReason;
+                EndActivity(repair ? "Coder出力形式repair" : "回答形式不一致", false);
+                if (repair) await SendCurrentStepAsync(cancellationToken);
                 return;
             }
 
@@ -304,10 +307,13 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
             if (!_orchestrator.AnswerMatchesCurrentRole(answer))
             {
-                _orchestrator.RecordAnswer(answer);
+                var repair = _orchestrator.RecordAnswer(answer);
+                if (repair && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                    await RefreshCurrentCoderContextAsync(cancellationToken);
                 UpdateOrchestratorUi();
-                StatusText.Text = _orchestrator.StopReason;
-                EndActivity("回答形式不一致", false);
+                StatusText.Text = repair ? "Coder出力形式を修復するため同じStepへ戻します。" : _orchestrator.StopReason;
+                EndActivity(repair ? "Coder出力形式repair" : "回答形式不一致", false);
+                if (repair) continue;
                 return;
             }
 

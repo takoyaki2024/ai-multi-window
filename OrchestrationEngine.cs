@@ -42,6 +42,10 @@ public sealed class OrchestrationEngine
     public string PreviousPatchSearchHash { get; set; } = string.Empty;
     public string RetryStrategy { get; set; } = string.Empty;
     public int CoderRepairAttempt { get; set; }
+    public string SafePatchHint { get; set; } = string.Empty;
+    public string SafePatchHintFile { get; set; } = string.Empty;
+    public string SafePatchHintHash { get; set; } = string.Empty;
+    public bool CoderOutputFormatRepair { get; set; }
 
     [JsonIgnore]
     public int CoderStepNumber => ImplementationSteps.Count == 0 ? 1 : Math.Min(CoderStepIndex + 1, ImplementationSteps.Count);
@@ -76,6 +80,7 @@ public sealed class OrchestrationEngine
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
         AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
         PreviousFailedCoderAttempt = string.Empty; PreviousPatchSearchHash = string.Empty; RetryStrategy = string.Empty; CoderRepairAttempt = 0;
+        SafePatchHint = string.Empty; SafePatchHintFile = string.Empty; SafePatchHintHash = string.Empty; CoderOutputFormatRepair = false;
         Save();
         WorkflowDiagnostics.Event("1 Manager", "workflow", "WORKFLOW_STARTED", $"taskLength={TaskText.Length}; workspaceContextLength={WorkspaceContext.Length}");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_STARTED");
@@ -90,6 +95,7 @@ public sealed class OrchestrationEngine
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
         AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
         PreviousFailedCoderAttempt = string.Empty; PreviousPatchSearchHash = string.Empty; RetryStrategy = string.Empty; CoderRepairAttempt = 0;
+        SafePatchHint = string.Empty; SafePatchHintFile = string.Empty; SafePatchHintHash = string.Empty; CoderOutputFormatRepair = false;
         Save();
         WorkflowDiagnostics.Event("System", "workflow", "WORKFLOW_RESET");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_RESET");
@@ -160,7 +166,12 @@ public sealed class OrchestrationEngine
         WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_RECEIVED", $"length={normalized.Length}; lastExecutionSucceeded={LastExecutionSucceeded}; coderStep={CoderStepNumber}/{CoderStepCount}");
 
         var markerValid = AnswerMatchesCurrentRole(normalized);
-        if (!markerValid)
+        if (!markerValid && roleBefore == AgentRole.Coder)
+        {
+            ExecutionResult = "Coder回答に適用可能な FILE/ACTION/CONTENT または PATCH がありません。\nCODER_OUTPUT_FORMAT_REPAIR: true\nDETAIL: CODER_DONEを含む必須ブロック形式を確認できませんでした。";
+            LastExecutionSucceeded = false;
+        }
+        else if (!markerValid)
         {
             WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_FORMAT_MISMATCH", $"answerLength={normalized.Length}");
             WorkflowDiagnostics.Snapshot(this, "ANSWER_FORMAT_MISMATCH", $"role={roleBefore}; answerLength={normalized.Length}");
@@ -177,7 +188,6 @@ public sealed class OrchestrationEngine
         LastAnswerHash = hash;
         if (duplicateFailedCoderRepair)
         {
-            RetryStrategy = "ESCALATE_TO_MODIFY_IF_COMPLETE_FILE";
             WorkflowDiagnostics.Event("3 Coder", "repair", "CODER_DUPLICATE_REPAIR_ESCALATION",
                 $"duplicateCount={DuplicateCount}; nextRepairAttempt={FixAttempts + 1}/{MaxFixAttempts}; previousPatchSearchHash={PreviousPatchSearchHash}; retryStrategy={RetryStrategy}");
             WorkflowDiagnostics.Snapshot(this, "CODER_DUPLICATE_REPAIR_ESCALATION", "同じ失敗回答を停止理由にせず、次のrepair戦略へ昇格します。");
@@ -212,12 +222,28 @@ public sealed class OrchestrationEngine
                     CoderRepairAttempt = FixAttempts;
                     PreviousFailedCoderAttempt = normalized;
                     PreviousPatchSearchHash = BuildPatchSearchHash(normalized);
-                    if (IsNoSafeMatchFailure(ExecutionResult) && string.IsNullOrWhiteSpace(RetryStrategy))
-                        RetryStrategy = "RELOAD_COMPLETE_FILE_THEN_SHORT_UNIQUE_SEARCH";
+                    CoderOutputFormatRepair = IsCoderOutputFormatFailure(ExecutionResult);
+                    var extractedSafePatchHint = ExtractSafePatchHint(ExecutionResult);
+                    if (!string.IsNullOrWhiteSpace(extractedSafePatchHint))
+                    {
+                        SafePatchHint = extractedSafePatchHint;
+                        SafePatchHintFile = ExtractField(SafePatchHint, "FILE");
+                        SafePatchHintHash = BuildExactAnchorHash(SafePatchHint);
+                    }
+                    RetryStrategy = FixAttempts >= 2
+                        ? "FULL_FILE_MODIFY_IF_COMPLETE"
+                        : !string.IsNullOrWhiteSpace(SafePatchHint)
+                            ? "SAFE_ANCHOR_PATCH"
+                            : CoderOutputFormatRepair
+                                ? "CODER_OUTPUT_FORMAT_REPAIR"
+                                : "FULL_FILE_MODIFY_IF_COMPLETE";
                     WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_RETRY_LOCAL_VERIFICATION_FAILED", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; coderStep={CoderStepNumber}/{CoderStepCount}");
                     if (IsNoSafeMatchFailure(ExecutionResult))
                         WorkflowDiagnostics.Event("3 Coder", "repair", "NO_SAFE_MATCH_REPAIR",
                             $"PREVIOUS_PATCH_SEARCH_HASH={PreviousPatchSearchHash}; RETRY_STRATEGY={RetryStrategy}; CODER_REPAIR_ATTEMPT={CoderRepairAttempt}");
+                    if (CoderOutputFormatRepair)
+                        WorkflowDiagnostics.Event("3 Coder", "repair", "CODER_OUTPUT_FORMAT_REPAIR",
+                            $"repairAttempt={CoderRepairAttempt}; retryStrategy={RetryStrategy}");
                     WorkflowDiagnostics.Snapshot(this, "CODER_RETRY_LOCAL_VERIFICATION_FAILED", Tail(ExecutionResult, 3500));
                     if (FixAttempts >= MaxFixAttempts)
                     {
@@ -232,6 +258,10 @@ public sealed class OrchestrationEngine
                     PreviousPatchSearchHash = string.Empty;
                     RetryStrategy = string.Empty;
                     CoderRepairAttempt = 0;
+                    SafePatchHint = string.Empty;
+                    SafePatchHintFile = string.Empty;
+                    SafePatchHintHash = string.Empty;
+                    CoderOutputFormatRepair = false;
                     while (CoderStepAnswers.Count <= CoderStepIndex) CoderStepAnswers.Add(string.Empty);
                     CoderStepAnswers[CoderStepIndex] = normalized;
                     if (CoderStepIndex + 1 < CoderStepCount)
@@ -351,7 +381,12 @@ public sealed class OrchestrationEngine
             B. その最新内容から1〜3行程度の短い一意なSEARCHを整形せず完全コピーする。
             C. PREVIOUS_FAILED_CODER_ATTEMPT内と同じSEARCH文字列は絶対に再利用しない。
             D. PATCHで安全に表現できない場合、対象のCOMPLETE FILEが本当に先頭から末尾まで提供されている場合のみMODIFYへ切り替える。
-            RETRY_STRATEGYが ESCALATE_TO_MODIFY_IF_COMPLETE_FILE の場合は、短い別SEARCHへ変更するか、完全なファイル全体が提供済みならMODIFYへ昇格してください。
+            RETRY_STRATEGYは INITIAL_PATCH → SAFE_ANCHOR_PATCH → FULL_FILE_MODIFY_IF_COMPLETE → STOP の順に進みます。
+            SAFE_ANCHOR_PATCHでは必ず提供されたEXACT_ANCHORを使い、FULL_FILE_MODIFY_IF_COMPLETEでは完全なファイル全体が提供済みの場合だけMODIFYできます。
+            SAFE_PATCH_HINTがある場合、EXACT_ANCHORを文字単位でそのままSEARCHとして使うか、そのアンカーを含むPATCHを作ってください。
+            EXACT_ANCHORを整形・翻訳・省略したり、属性順を変更したりしてはいけません。
+            SAFE_PATCH_HINTがない場合だけ、COMPLETE FILEが本当に全体提供されていることを確認した上でMODIFYへ昇格できます。
+            CODER_OUTPUT_FORMAT_REPAIRがtrueの場合、前回回答は構文解析できませんでした。説明のみは禁止です。必ずFILE/ACTIONとPATCHまたはCONTENTの完全なブロックを出してください。
             このステップだけを完了させ、最後に独立行で CODER_DONE と書いてください。
 
             USER_REQUEST:
@@ -377,6 +412,12 @@ public sealed class OrchestrationEngine
 
             CODER_REPAIR_ATTEMPT:
             {CoderRepairAttempt}/{MaxFixAttempts}
+
+            SAFE_PATCH_HINT:
+            {(string.IsNullOrWhiteSpace(SafePatchHint) ? "(なし)" : SafePatchHint)}
+
+            CODER_OUTPUT_FORMAT_REPAIR:
+            {CoderOutputFormatRepair.ToString().ToLowerInvariant()}
 
             WORKSPACE_CONTEXT:
             {CoderWorkspaceContext}
@@ -482,6 +523,34 @@ public sealed class OrchestrationEngine
         value.Contains("PATCH_MATCH_MODE: NO_SAFE_MATCH", StringComparison.OrdinalIgnoreCase)
         || value.Contains("matches=0", StringComparison.OrdinalIgnoreCase)
         || value.Contains("matches = 0", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCoderOutputFormatFailure(string value) =>
+        value.Contains("Coder回答に適用可能な FILE/ACTION/CONTENT または PATCH がありません", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("CODER_OUTPUT_FORMAT_REPAIR: true", StringComparison.OrdinalIgnoreCase);
+
+    private static string ExtractSafePatchHint(string value)
+    {
+        var match = Regex.Match(value,
+            @"(?ms)^SAFE_PATCH_HINT:\s*\r?\nFILE:.*?^EXACT_ANCHOR\s*$",
+            RegexOptions.CultureInvariant);
+        return match.Success ? match.Value.Trim() : string.Empty;
+    }
+
+    private static string ExtractField(string block, string field)
+    {
+        if (string.IsNullOrWhiteSpace(block)) return string.Empty;
+        var match = Regex.Match(block, $@"(?m)^{Regex.Escape(field)}:\s*(?<value>[^\r\n]+)\r?$", RegexOptions.CultureInvariant);
+        return match.Success ? match.Groups["value"].Value.Trim() : string.Empty;
+    }
+
+    private static string BuildExactAnchorHash(string hint)
+    {
+        if (string.IsNullOrWhiteSpace(hint)) return string.Empty;
+        var match = Regex.Match(hint, @"(?ms)^<<<EXACT_ANCHOR\s*\r?\n(?<anchor>.*?)\r?\nEXACT_ANCHOR\s*$", RegexOptions.CultureInvariant);
+        return match.Success
+            ? Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(match.Groups["anchor"].Value)))
+            : string.Empty;
+    }
 
     private static string BuildPatchSearchHash(string answer)
     {

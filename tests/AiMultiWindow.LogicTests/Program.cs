@@ -10,7 +10,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("coder-context-is-current-step-scoped", CoderContextIsCurrentStepScoped),
     ("step-rollback-preserves-committed-step", StepRollbackPreservesCommittedStep),
     ("no-safe-match-duplicate-escalates-repair", NoSafeMatchDuplicateEscalatesRepair),
-    ("failed-patch-repairs-through-reviewer", FailedPatchRepairsThroughReviewer)
+    ("failed-patch-repairs-through-reviewer", FailedPatchRepairsThroughReviewer),
+    ("safe-patch-hint-produces-valid-patch", SafePatchHintProducesValidPatch),
+    ("invalid-output-format-repairs-to-valid-patch", InvalidOutputFormatRepairsToValidPatch)
 };
 
 var failures = 0;
@@ -143,9 +145,9 @@ static Task NoSafeMatchDuplicateEscalatesRepair()
     e.SetExecutionResult(noSafeMatch, false);
     Assert(e.RecordAnswer(failedAnswer), "duplicate failed answer escalates instead of duplicate stop");
     Assert(e.State == WorkflowState.Running && e.CurrentRole == AgentRole.Coder, "duplicate repair remains running");
-    Assert(e.RetryStrategy == "ESCALATE_TO_MODIFY_IF_COMPLETE_FILE", "duplicate selects next repair strategy");
+    Assert(e.RetryStrategy == "FULL_FILE_MODIFY_IF_COMPLETE", "duplicate selects the final bounded repair strategy");
     Assert(e.CoderRepairAttempt == 2 && e.FixAttempts == 2, "repair remains bounded by existing fix counter");
-    Assert(e.BuildCurrentPrompt().Contains("ESCALATE_TO_MODIFY_IF_COMPLETE_FILE"), "escalated strategy is explicit in next prompt");
+    Assert(e.BuildCurrentPrompt().Contains("FULL_FILE_MODIFY_IF_COMPLETE"), "escalated strategy is explicit in next prompt");
     e.SetExecutionResult(noSafeMatch, false);
     Assert(!e.RecordAnswer(failedAnswer), "third failed repair reaches existing fix limit");
     Assert(e.State == WorkflowState.Stopped && e.StopReason.Contains("修正回数上限"), "loop stops by MaxFixAttempts, not generic duplicate blocking");
@@ -170,10 +172,20 @@ static async Task FailedPatchRepairsThroughReviewer()
         var failedAnswer = Patch("Value.cs", "Number = 999", "Number = 2");
         var failed = await WorkspaceExecutor.ApplyCoderResponseAsync(root, failedAnswer);
         Assert(!failed.Success && failed.TestOutput.Contains("PATCH_MATCH_MODE: NO_SAFE_MATCH"), "first PATCH fails with NO_SAFE_MATCH");
+        Assert(failed.TestOutput.Contains("SAFE_PATCH_HINT:") && failed.TestOutput.Contains("SOURCE: CURRENT_WORKSPACE_FILE"), "executor emits a current-file exact anchor");
         e.SetExecutionResult(failed.Summary + "\n" + failed.TestOutput, false);
         Assert(e.RecordAnswer(failedAnswer), "failed patch returns to same coder step");
         e.SetCoderWorkspaceContext(await WorkspaceContextBuilder.BuildCoderAsync(root, e.CurrentImplementationStep));
         Assert(e.CoderWorkspaceContext.Contains("Number = 1"), "repair context is regenerated from current disk");
+        Assert(e.RetryStrategy == "SAFE_ANCHOR_PATCH" && e.BuildCurrentPrompt().Contains("<<<EXACT_ANCHOR"), "safe anchor strategy and exact text reach repair prompt");
+
+        const string invalidRepair = "修正方針の説明のみです。\nCODER_DONE";
+        var invalid = await WorkspaceExecutor.ApplyCoderResponseAsync(root, invalidRepair);
+        Assert(!invalid.Success && invalid.Summary.Contains("適用可能な"), "second attempt is classified as output format repair");
+        e.SetExecutionResult(invalid.Summary, false);
+        Assert(e.RecordAnswer(invalidRepair), "format failure remains in bounded repair loop");
+        e.SetCoderWorkspaceContext(await WorkspaceContextBuilder.BuildCoderAsync(root, e.CurrentImplementationStep));
+        Assert(e.RetryStrategy == "FULL_FILE_MODIFY_IF_COMPLETE" && e.CoderOutputFormatRepair, "second failure advances to final repair strategy");
 
         var repairedAnswer = Patch("Value.cs", "Number = 1", "Number = 2");
         var repaired = await WorkspaceExecutor.ApplyCoderResponseAsync(root, repairedAnswer);
@@ -200,6 +212,70 @@ static async Task FailedPatchRepairsThroughReviewer()
     }
 }
 
+static async Task SafePatchHintProducesValidPatch()
+{
+    var root = TempRoot();
+    try
+    {
+        const string currentLine = "public static class Value { public const int Number = 1; }";
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        await File.WriteAllTextAsync(Path.Combine(root, "Value.cs"), currentLine);
+        var failedAnswer = Patch("Value.cs", "public static class Value { public const int Number = 999; }", "public static class Value { public const int Number = 2; }");
+        var failed = await WorkspaceExecutor.ApplyCoderResponseAsync(root, failedAnswer);
+        Assert(!failed.Success, "hallucinated SEARCH fails without fuzzy application");
+        Assert((await File.ReadAllTextAsync(Path.Combine(root, "Value.cs"))) == currentLine, "fuzzy candidate never changes the file");
+        var normalizedFeedback = failed.TestOutput.Replace("\r\n", "\n", StringComparison.Ordinal);
+        Assert(normalizedFeedback.Contains($"<<<EXACT_ANCHOR\n{currentLine}\nEXACT_ANCHOR"), "hint copies exact current-file text");
+
+        var e = AtCoderWithTwoSteps();
+        e.SetExecutionResult(failed.Summary + "\n" + failed.TestOutput, false);
+        Assert(e.RecordAnswer(failedAnswer), "NO_SAFE_MATCH enters repair");
+        var prompt = e.BuildCurrentPrompt();
+        Assert(prompt.Contains(currentLine) && prompt.Contains("文字単位でそのままSEARCH"), "exact anchor and immutable-use instruction reach Coder");
+        Assert(e.SafePatchHintFile == "Value.cs" && !string.IsNullOrWhiteSpace(e.SafePatchHintHash), $"hint diagnostics state is populated: file={e.SafePatchHintFile}; hash={e.SafePatchHintHash}; hint={e.SafePatchHint}");
+
+        var valid = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Patch("Value.cs", currentLine, "public static class Value { public const int Number = 2; }"));
+        Assert(valid.Success, "PATCH using exact anchor passes build/test");
+        WorkspaceExecutor.CommitPending();
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
+static async Task InvalidOutputFormatRepairsToValidPatch()
+{
+    var root = TempRoot();
+    try
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        await File.WriteAllTextAsync(Path.Combine(root, "Value.cs"), "public static class Value { public const int Number = 1; }");
+        var e = AtCoderWithTwoSteps();
+        const string invalid = "変更方法の説明だけです。\nCODER_DONE";
+        var parsed = await WorkspaceExecutor.ApplyCoderResponseAsync(root, invalid);
+        Assert(!parsed.Success && parsed.Summary.Contains("適用可能な"), "invalid output has no executable block");
+        e.SetExecutionResult(parsed.Summary, false);
+        Assert(e.RecordAnswer(invalid), "invalid output becomes repair instead of terminal format stop");
+        var prompt = e.BuildCurrentPrompt();
+        Assert(e.CoderOutputFormatRepair && prompt.Contains("CODER_OUTPUT_FORMAT_REPAIR:") && prompt.Contains("true"), "format repair state reaches prompt");
+        Assert(prompt.Contains("説明のみは禁止") && prompt.Contains("必ずFILE/ACTION"), "prompt requires executable syntax");
+
+        var validAnswer = Patch("Value.cs", "Number = 1", "Number = 2");
+        var valid = await WorkspaceExecutor.ApplyCoderResponseAsync(root, validAnswer);
+        Assert(valid.Success, "valid FILE/ACTION/PATCH passes after format repair");
+        WorkspaceExecutor.CommitPending();
+        e.SetExecutionResult(valid.Summary + "\n" + valid.TestOutput, true);
+        Assert(e.RecordAnswer(validAnswer) && e.CoderStepNumber == 2, "valid repair advances to next step");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
 static OrchestrationEngine AtCoderWithTwoSteps()
 {
     var e = new OrchestrationEngine();
@@ -215,8 +291,9 @@ static OrchestrationEngine AtReviewer(bool verificationSucceeded)
     e.Start("task");
     e.RecordAnswer("MANAGER_DONE");
     e.RecordAnswer("PLAN_DONE");
-    e.SetExecutionResult("result", verificationSucceeded);
+    e.SetExecutionResult("result", true);
     e.RecordAnswer("CODER_DONE");
+    e.LastExecutionSucceeded = verificationSucceeded;
     return e;
 }
 

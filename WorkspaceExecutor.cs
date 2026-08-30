@@ -209,6 +209,9 @@ public static class WorkspaceExecutor
                         {
                             verification.AppendLine(
                                 "PRECHECK_RESULT: FAIL (SEARCHは完全一致、または改行/行末空白差のみを許容した一意一致1件が必要)");
+                            var safeHint = BuildSafePatchHint(change.Path, original, search);
+                            if (!string.IsNullOrWhiteSpace(safeHint))
+                                verification.AppendLine(safeHint);
                             return await FailAndRollbackAsync(
                                 $"PATCHのSEARCHを安全に一意特定できません: {change.Path} (matches={match.MatchCount}, mode={match.Mode})",
                                 verification.ToString());
@@ -586,6 +589,71 @@ public static class WorkspaceExecutor
 
         return count;
     }
+
+    private static string? BuildSafePatchHint(string path, string source, string failedSearch)
+    {
+        var sourceLines = ReadLineSegments(source);
+        var failedLines = failedSearch.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n')
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .ToList();
+        if (sourceLines.Count == 0 || failedLines.Count == 0) return null;
+
+        var ranked = sourceLines
+            .Select((segment, index) => new
+            {
+                Index = index,
+                Text = source[segment.Start..segment.ContentEnd],
+                Score = failedLines.Max(failed => HintSimilarity(source[segment.Start..segment.ContentEnd], failed))
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.Text) && item.Text.Trim().Length >= 8 && item.Score > 0)
+            .OrderByDescending(item => item.Score)
+            .ThenByDescending(item => item.Text.Trim().Length)
+            .Take(12);
+
+        foreach (var item in ranked)
+        {
+            for (var lineCount = 1; lineCount <= 3; lineCount++)
+            {
+                for (var offset = 0; offset < lineCount; offset++)
+                {
+                    var startLine = item.Index - offset;
+                    if (startLine < 0 || startLine + lineCount > sourceLines.Count) continue;
+                    var first = sourceLines[startLine];
+                    var last = sourceLines[startLine + lineCount - 1];
+                    var anchor = source[first.Start..last.ContentEnd];
+                    if (string.IsNullOrWhiteSpace(anchor) || CountExactOccurrences(source, anchor) != 1) continue;
+
+                    return $"SAFE_PATCH_HINT:{Environment.NewLine}" +
+                        $"FILE: {path}{Environment.NewLine}" +
+                        $"SOURCE: CURRENT_WORKSPACE_FILE{Environment.NewLine}" +
+                        $"UNIQUE_MATCHES: 1{Environment.NewLine}" +
+                        $"<<<EXACT_ANCHOR{Environment.NewLine}" +
+                        anchor + Environment.NewLine +
+                        "EXACT_ANCHOR";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static double HintSimilarity(string currentLine, string failedLine)
+    {
+        var currentTokens = HintTokens(currentLine);
+        var failedTokens = HintTokens(failedLine);
+        if (currentTokens.Count == 0 || failedTokens.Count == 0) return 0;
+        var common = currentTokens.Intersect(failedTokens, StringComparer.OrdinalIgnoreCase).Count();
+        if (common == 0) return 0;
+        return (2.0 * common) / (currentTokens.Count + failedTokens.Count);
+    }
+
+    private static HashSet<string> HintTokens(string value) => Regex
+        .Matches(value, @"[\p{L}\p{N}_:.#/-]+", RegexOptions.CultureInvariant)
+        .Cast<Match>()
+        .Select(match => match.Value)
+        .Where(token => token.Length >= 2)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     private static string? SafePath(string root, string relativePath)
     {
