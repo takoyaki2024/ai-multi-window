@@ -174,6 +174,14 @@ public partial class MainWindow : Window
         {
             var answer = await pane.GetLatestAnswerAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
+            if (!_orchestrator.AnswerMatchesCurrentRole(answer))
+            {
+                _orchestrator.RecordAnswer(answer);
+                UpdateOrchestratorUi();
+                StatusText.Text = _orchestrator.StopReason;
+                EndActivity("回答形式不一致", false);
+                return;
+            }
 
             if (role == AgentRole.Coder)
             {
@@ -182,36 +190,33 @@ public partial class MainWindow : Window
                 BeginActivity(role, "Workspace適用 / build / test", 120);
                 var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(workspace, answer);
                 var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
-                _orchestrator.SetExecutionResult(executionText, execution.Success);
+                var executionSucceeded = execution.Success;
+                if (executionSucceeded)
+                {
+                    var commit = WorkspaceExecutor.CommitPending();
+                    executionText += Environment.NewLine + commit;
+                    executionSucceeded = !commit.Contains("FAILED", StringComparison.Ordinal);
+                    if (!executionSucceeded) executionText += Environment.NewLine + await WorkspaceExecutor.RollbackPendingAsync();
+                }
+                _orchestrator.SetExecutionResult(executionText, executionSucceeded);
                 if (!execution.Success)
-                    StatusText.Text = "ローカル適用/ビルドに失敗。変更をロールバックし、Reviewerへ結果を渡します。";
-            }
-
-            if (role == AgentRole.Planner)
-            {
-                BeginActivity(role, "Coder用コンテキスト作成", 30);
-                var coderContext = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
-                _orchestrator.SetCoderWorkspaceContext(coderContext);
+                    StatusText.Text = "ローカル適用/ビルドに失敗。現在StepだけをロールバックしてCoderへ戻します。";
             }
 
             var advanced = _orchestrator.RecordAnswer(answer);
+
+            if (advanced && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                await RefreshCurrentCoderContextAsync(cancellationToken);
 
             if (role == AgentRole.Reviewer)
             {
                 if (_orchestrator.State == WorkflowState.Success)
                 {
-                    var commitResult = WorkspaceExecutor.CommitPending();
-                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + commitResult);
-                    if (commitResult.Contains("FAILED", StringComparison.Ordinal)) _orchestrator.Stop(commitResult);
+                    // Every verified Coder step is committed before Reviewer is entered.
                 }
                 else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
                 {
-                    var rollbackResult = await WorkspaceExecutor.RollbackPendingAsync();
-                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + rollbackResult);
-                    StatusText.Text = "Reviewer FAIL — 今回の変更をロールバックしてCoderへ戻します。";
-                    BeginActivity(AgentRole.Coder, "Reviewer指摘後の再準備", 30);
-                    var refreshed = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), _orchestrator.GetAnswer(AgentRole.Planner), cancellationToken);
-                    _orchestrator.SetCoderWorkspaceContext(refreshed);
+                    StatusText.Text = "Reviewer FAIL — 確定済みStepを保持し、最終Stepの修正へ戻します。";
                 }
                 else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
                 {
@@ -256,6 +261,16 @@ public partial class MainWindow : Window
     private async Task<bool> SendCurrentStepAsync(CancellationToken cancellationToken)
     {
         if (_orchestrator.State != WorkflowState.Running) return false;
+        if (_orchestrator.AwaitingResponse)
+        {
+            var awaitingPane = _panes[(int)_orchestrator.AwaitingRole];
+            if (awaitingPane.HasPendingWorkflowResponse)
+            {
+                WorkflowDiagnostics.Event($"{(int)_orchestrator.AwaitingRole + 1} {_orchestrator.AwaitingRole}", "send", "PENDING_RESPONSE_RESUMED");
+                return true;
+            }
+            _orchestrator.AbandonAwaitingResponse("WebViewに対応する回答待ち情報がないため、明示的な再開時に再送可能化");
+        }
         if (!_orchestrator.TryBeginPromptAttempt()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; EndActivity("送信上限で停止", false); return false; }
         var role = _orchestrator.CurrentRole; var pane = _panes[(int)role]; var prompt = _orchestrator.BuildCurrentPrompt();
         StatusText.Text = $"{role} へ送信中...";
@@ -287,37 +302,44 @@ public partial class MainWindow : Window
             BeginActivity(role, "ChatGPT回答生成・完了待ち", 120);
             var answer = await _panes[(int)role].GetLatestAnswerAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; EndActivity("回答取得失敗", false); return; }
-
-            if (role == AgentRole.Planner)
+            if (!_orchestrator.AnswerMatchesCurrentRole(answer))
             {
-                BeginActivity(role, "Coder用コンテキスト作成", 30);
-                var context = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
-                _orchestrator.SetCoderWorkspaceContext(context);
+                _orchestrator.RecordAnswer(answer);
+                UpdateOrchestratorUi();
+                StatusText.Text = _orchestrator.StopReason;
+                EndActivity("回答形式不一致", false);
+                return;
             }
+
             if (role == AgentRole.Coder)
             {
                 StatusText.Text = "Coder変更を適用し、build/testを実行中...";
                 BeginActivity(role, "Workspace適用 / build / test", 120);
                 var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
-                _orchestrator.SetExecutionResult(execution.Summary + Environment.NewLine + execution.TestOutput, execution.Success);
+                var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
+                var executionSucceeded = execution.Success;
+                if (executionSucceeded)
+                {
+                    var commit = WorkspaceExecutor.CommitPending();
+                    executionText += Environment.NewLine + commit;
+                    executionSucceeded = !commit.Contains("FAILED", StringComparison.Ordinal);
+                    if (!executionSucceeded) executionText += Environment.NewLine + await WorkspaceExecutor.RollbackPendingAsync();
+                }
+                _orchestrator.SetExecutionResult(executionText, executionSucceeded);
             }
 
             var advanced = _orchestrator.RecordAnswer(answer);
+            if (advanced && _orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                await RefreshCurrentCoderContextAsync(cancellationToken);
             if (role == AgentRole.Reviewer)
             {
                 if (_orchestrator.State == WorkflowState.Success)
                 {
-                    var commit = WorkspaceExecutor.CommitPending();
-                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + commit);
-                    if (commit.Contains("FAILED", StringComparison.Ordinal)) _orchestrator.Stop(commit);
+                    // Every verified Coder step is committed before Reviewer is entered.
                 }
                 else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
                 {
-                    var rollback = await WorkspaceExecutor.RollbackPendingAsync();
-                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + rollback);
-                    BeginActivity(AgentRole.Coder, "Reviewer指摘後の再準備", 30);
-                    var refreshed = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), _orchestrator.GetAnswer(AgentRole.Planner), cancellationToken);
-                    _orchestrator.SetCoderWorkspaceContext(refreshed);
+                    StatusText.Text = "Reviewer FAIL — 確定済みStepを保持し、最終Stepの修正へ戻します。";
                 }
                 else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
                     await WorkspaceExecutor.RollbackPendingAsync();
@@ -330,6 +352,16 @@ public partial class MainWindow : Window
                 return;
             }
         }
+    }
+
+    private async Task RefreshCurrentCoderContextAsync(CancellationToken cancellationToken)
+    {
+        BeginActivity(AgentRole.Coder, $"Coder Step {_orchestrator.CoderStepNumber}/{_orchestrator.CoderStepCount} コンテキスト作成", 30);
+        var context = await WorkspaceContextBuilder.BuildCoderAsync(
+            WorkspaceTextBox.Text.Trim(),
+            _orchestrator.CurrentImplementationStep,
+            cancellationToken);
+        _orchestrator.SetCoderWorkspaceContext(context);
     }
 
     private void BeginActivity(AgentRole? role, string stage, int timeoutSeconds)

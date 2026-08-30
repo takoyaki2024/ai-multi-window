@@ -8,7 +8,8 @@ public sealed record WorkspaceExecutionResult(bool Success, string Summary, stri
 
 public static class WorkspaceExecutor
 {
-    private const int MaxFiles = 12;
+    private const int MaxChangeBlocks = 8;
+    private const int MaxFilesPerStep = 2;
     private const int MaxContentChars = 250_000;
     private static readonly List<FileSnapshot> PendingSnapshots = new();
     private static string? PendingRoot;
@@ -53,13 +54,13 @@ public static class WorkspaceExecutor
             return new(false, "前回の変更が未確定です。Reviewer判定後に再実行してください。", string.Empty);
 
         var root = Path.GetFullPath(workspaceRoot);
-        var changes = ParseChanges(coderResponse).Take(MaxFiles + 1).ToList();
+        var changes = ParseChanges(coderResponse).Take(MaxChangeBlocks + 1).ToList();
 
         if (changes.Count == 0)
             return new(false, "Coder回答に適用可能な FILE/ACTION/CONTENT または PATCH がありません。", string.Empty);
 
-        if (changes.Count > MaxFiles)
-            return new(false, $"変更ブロック数が上限 {MaxFiles} を超えています。", string.Empty);
+        if (changes.Count > MaxChangeBlocks)
+            return new(false, $"変更ブロック数が上限 {MaxChangeBlocks} を超えています。", string.Empty);
 
         var validationError = ValidateChangeSet(root, changes);
         if (validationError is not null)
@@ -614,6 +615,13 @@ public static class WorkspaceExecutor
 
     private static string? ValidateChangeSet(string root, IReadOnlyList<FileChange> changes)
     {
+        var distinctFiles = changes
+            .Select(change => change.Path.Replace('\\', '/'))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+        if (distinctFiles > MaxFilesPerStep)
+            return $"1 Stepの変更対象は最大 {MaxFilesPerStep} ファイルです (指定 {distinctFiles} ファイル)。";
+
         var actionsByTarget = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var change in changes)

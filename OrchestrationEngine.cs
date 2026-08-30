@@ -35,6 +35,9 @@ public sealed class OrchestrationEngine
     public int CoderStepIndex { get; set; }
     public List<string> CoderStepAnswers { get; set; } = new();
     public List<string> SuccessfulExecutionResults { get; set; } = new();
+    public bool AwaitingResponse { get; set; }
+    public AgentRole AwaitingRole { get; set; } = AgentRole.Manager;
+    public int AwaitingCoderStepIndex { get; set; }
 
     [JsonIgnore]
     public int CoderStepNumber => ImplementationSteps.Count == 0 ? 1 : Math.Min(CoderStepIndex + 1, ImplementationSteps.Count);
@@ -67,6 +70,7 @@ public sealed class OrchestrationEngine
         LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
         WorkspaceContext = workspaceContext; CoderWorkspaceContext = string.Empty;
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
+        AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
         Save();
         WorkflowDiagnostics.Event("1 Manager", "workflow", "WORKFLOW_STARTED", $"taskLength={TaskText.Length}; workspaceContextLength={WorkspaceContext.Length}");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_STARTED");
@@ -79,6 +83,7 @@ public sealed class OrchestrationEngine
         LastAnswerHash = string.Empty; DuplicateCount = 0; ExecutionResult = string.Empty; LastExecutionSucceeded = false;
         WorkspaceContext = string.Empty; CoderWorkspaceContext = string.Empty;
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
+        AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
         Save();
         WorkflowDiagnostics.Event("System", "workflow", "WORKFLOW_RESET");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_RESET");
@@ -97,7 +102,11 @@ public sealed class OrchestrationEngine
     {
         ExecutionResult = value;
         LastExecutionSucceeded = success;
-        if (success) SuccessfulExecutionResults.Add(value);
+        if (success)
+        {
+            while (SuccessfulExecutionResults.Count <= CoderStepIndex) SuccessfulExecutionResults.Add(string.Empty);
+            SuccessfulExecutionResults[CoderStepIndex] = value;
+        }
         Save();
         WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "local-verification", success ? "LOCAL_VERIFICATION_PASS" : "LOCAL_VERIFICATION_FAIL", Tail(value, 1200));
         if (!success) WorkflowDiagnostics.Snapshot(this, "LOCAL_VERIFICATION_FAIL", Tail(value, 3500));
@@ -108,6 +117,7 @@ public sealed class OrchestrationEngine
     public bool TryBeginPromptAttempt()
     {
         if (State != WorkflowState.Running) return false;
+        if (AwaitingResponse) return false;
         if (AiCalls >= MaxAiCalls) { Stop("AI呼び出し上限に達しました"); return false; }
         if (SendAttempts >= MaxSendAttempts) { Stop("送信試行回数の上限に達しました"); return false; }
         SendAttempts++;
@@ -118,6 +128,9 @@ public sealed class OrchestrationEngine
     public void RecordPromptAccepted()
     {
         AiCalls++;
+        AwaitingResponse = true;
+        AwaitingRole = CurrentRole;
+        AwaitingCoderStepIndex = CoderStepIndex;
         WorkflowDiagnostics.Event(RoleLabel(CurrentRole), "send", "PROMPT_ACCEPTED", $"aiCalls={AiCalls}; sendAttempts={SendAttempts}; coderStep={CoderStepNumber}/{CoderStepCount}");
         Save();
     }
@@ -133,16 +146,14 @@ public sealed class OrchestrationEngine
 
         var roleBefore = CurrentRole;
         var normalized = answer.Trim();
+        if (AwaitingResponse && (AwaitingRole != CurrentRole || AwaitingCoderStepIndex != CoderStepIndex))
+        {
+            Stop("送信待ち状態と現在工程が一致しません");
+            return false;
+        }
         WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_RECEIVED", $"length={normalized.Length}; lastExecutionSucceeded={LastExecutionSucceeded}; coderStep={CoderStepNumber}/{CoderStepCount}");
 
-        var markerValid = CurrentRole switch
-        {
-            AgentRole.Manager => ContainsMarker(normalized, "MANAGER_DONE"),
-            AgentRole.Planner => ContainsMarker(normalized, "PLAN_DONE"),
-            AgentRole.Coder => ContainsMarker(normalized, "CODER_DONE"),
-            AgentRole.Reviewer => ReviewerVerdict(normalized) != ReviewVerdict.Unknown,
-            _ => false
-        };
+        var markerValid = AnswerMatchesCurrentRole(normalized);
         if (!markerValid)
         {
             WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "ANSWER_FORMAT_MISMATCH", $"answerLength={normalized.Length}");
@@ -151,7 +162,8 @@ public sealed class OrchestrationEngine
             return false;
         }
 
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized)));
+        var answerIdentity = $"{roleBefore}:{CoderStepIndex}:{normalized}";
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(answerIdentity)));
         DuplicateCount = hash == LastAnswerHash ? DuplicateCount + 1 : 0;
         LastAnswerHash = hash;
         if (DuplicateCount >= DuplicateLimit)
@@ -162,6 +174,7 @@ public sealed class OrchestrationEngine
             return false;
         }
         Answers[CurrentRole] = normalized;
+        AwaitingResponse = false;
 
         switch (CurrentRole)
         {
@@ -191,19 +204,10 @@ public sealed class OrchestrationEngine
                 }
                 else
                 {
-                    CoderStepAnswers.Add(normalized);
-                    FixAttempts = 0;
+                    while (CoderStepAnswers.Count <= CoderStepIndex) CoderStepAnswers.Add(string.Empty);
+                    CoderStepAnswers[CoderStepIndex] = normalized;
                     if (CoderStepIndex + 1 < CoderStepCount)
                     {
-                        var commit = WorkspaceExecutor.CommitPending();
-                        ExecutionResult += Environment.NewLine + commit;
-                        if (commit.Contains("FAILED", StringComparison.Ordinal))
-                        {
-                            Stop(commit);
-                            return false;
-                        }
-
-                        WorkflowDiagnostics.Event("3 Coder", "step", "CODER_STEP_COMMITTED", $"step={CoderStepNumber}/{CoderStepCount}; {commit}");
                         CoderStepIndex++;
                         CurrentRole = AgentRole.Coder;
                         WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_STEP_TO_NEXT", $"nextStep={CoderStepNumber}/{CoderStepCount}; completedAnswers={CoderStepAnswers.Count}");
@@ -352,6 +356,23 @@ public sealed class OrchestrationEngine
     };
 
     public string GetAnswer(AgentRole role) => Answers.TryGetValue(role, out var value) ? value : "(なし)";
+
+    public bool AnswerMatchesCurrentRole(string answer) => CurrentRole switch
+    {
+        AgentRole.Manager => ContainsMarker(answer, "MANAGER_DONE"),
+        AgentRole.Planner => ContainsMarker(answer, "PLAN_DONE"),
+        AgentRole.Coder => ContainsMarker(answer, "CODER_DONE"),
+        AgentRole.Reviewer => ReviewerVerdict(answer) != ReviewVerdict.Unknown,
+        _ => false
+    };
+
+    public void AbandonAwaitingResponse(string reason)
+    {
+        if (!AwaitingResponse) return;
+        WorkflowDiagnostics.Event(RoleLabel(AwaitingRole), "answer", "PENDING_RESPONSE_ABANDONED", reason);
+        AwaitingResponse = false;
+        Save();
+    }
 
     public void Save()
     {

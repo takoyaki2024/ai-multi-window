@@ -7,7 +7,7 @@ public static class WorkspaceContextBuilder
     private const int MaxContextChars = 14_000;
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
-    private const int MaxCoderFiles = 4;
+    private const int MaxCoderFiles = 2;
     private const int MaxCoderContextChars = 40_000;
     private const int MaxCoderSingleFileChars = 80_000;
 

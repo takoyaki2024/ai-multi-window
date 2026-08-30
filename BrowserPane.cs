@@ -22,6 +22,9 @@ public sealed class BrowserPane : Grid
     private string _homeUrl;
     private string? _fallbackWorkflowAnswer;
 
+    public bool HasPendingWorkflowResponse =>
+        !string.IsNullOrWhiteSpace(_fallbackWorkflowAnswer) || _chatAdapter?.HasPendingResponse == true;
+
     public event Action<string>? UrlChanged;
 
     public BrowserPane(string initialUrl, int paneIndex)
@@ -274,25 +277,16 @@ public sealed class BrowserPane : Grid
         {
             _aiStatus.Text = "取得中";
             var text = await _chatAdapter.WaitForLatestResponseAsync(cancellationToken);
-            if (string.IsNullOrWhiteSpace(text))
-                text = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
             _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
         catch (TimeoutException)
         {
-            var fallback = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
-            _aiStatus.Text = string.IsNullOrWhiteSpace(fallback) ? "取得タイムアウト" : "取得済(可視回答)";
-            return string.IsNullOrWhiteSpace(fallback) ? null : fallback;
+            _aiStatus.Text = "取得タイムアウト(送信は保持)";
+            return null;
         }
         catch (Exception ex)
         {
-            var fallback = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
-            if (!string.IsNullOrWhiteSpace(fallback))
-            {
-                _aiStatus.Text = "取得済(可視回答)";
-                return fallback;
-            }
             SetExceptionStatus("取得失敗", ex);
             return null;
         }

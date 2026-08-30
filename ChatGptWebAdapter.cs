@@ -15,6 +15,7 @@ public sealed class ChatGptWebAdapter
     private string? _lastLogPath;
 
     public string? LastLogPath => _lastLogPath;
+    public bool HasPendingResponse => _pendingResponse is not null;
 
     public ChatGptWebAdapter(CoreWebView2 core) => _core = core;
 
@@ -25,6 +26,9 @@ public sealed class ChatGptWebAdapter
         var log = new StringBuilder();
         try
         {
+            if (_pendingResponse is not null)
+                return await FailAsync(log, "PENDING_RESPONSE", "The previously accepted send must be collected before another message can be sent.");
+
             Log(log, "SEND_START", $"expectedLength={message.Length}; normalizedExpectedLength={Normalize(message).Length}");
             var initial = await ReadStateAsync(cancellationToken);
             LogState(log, "INITIAL", initial);
@@ -75,18 +79,22 @@ public sealed class ChatGptWebAdapter
             await DispatchMouseAsync("mousePressed", ready.SendX.Value, ready.SendY.Value, cancellationToken);
             await DispatchMouseAsync("mouseReleased", ready.SendX.Value, ready.SendY.Value, cancellationToken);
 
-            var accepted = await WaitForAcceptanceAsync(initial, message, log, cancellationToken);
-            if (!accepted.Success)
-            {
-                await FlushLogAsync(log);
-                return accepted;
-            }
-
+            // Once the single physical click has been dispatched, treat this turn as in-flight.
+            // Losing a transient DOM user-turn signal must never make the caller click Send again.
             _pendingResponse = new ResponseBaseline(
                 initial.AssistantCount,
                 initial.UserCount,
                 initial.LatestAssistantText,
                 message);
+
+            var accepted = await WaitForAcceptanceAsync(initial, message, log, cancellationToken);
+            if (!accepted.Success)
+            {
+                Log(log, "SEND_TRIGGERED_UNCONFIRMED", $"{accepted.Code}: response wait will continue from the preserved baseline");
+                await FlushLogAsync(log);
+                return new(true, "TRIGGERED_UNCONFIRMED", BuildDetail("The single send click was dispatched; acceptance DOM signals were inconclusive, so the response remains pending without resending."));
+            }
+
             Log(log, "SEND_ACCEPTED", "new user turn and assistant generation observed");
             await FlushLogAsync(log);
             return new(true, "ACCEPTED", BuildDetail("A new user turn and assistant generation were observed."));
@@ -227,7 +235,9 @@ public sealed class ChatGptWebAdapter
             last = await ReadStateAsync(cancellationToken);
             var bodyMatches = TransportTextEquals(last.LatestUserText, message);
             userObserved |= last.UserCount > baseline.UserCount;
-            if (userObserved && (last.Generating || last.AssistantCount > baseline.AssistantCount))
+            var assistantChanged = !TextEquals(last.LatestAssistantText, baseline.LatestAssistantText);
+            var assistantActivity = last.Generating || last.AssistantCount > baseline.AssistantCount || assistantChanged;
+            if (assistantActivity && (userObserved || last.AssistantCount > baseline.AssistantCount || assistantChanged))
             {
                 LogState(log, "ACCEPTED_STATE", last);
                 Log(log, "ACCEPTED_COMPARE",
