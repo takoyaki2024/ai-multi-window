@@ -26,40 +26,84 @@ public static class WorkspaceExecutor
         if (changes.Count > MaxFiles)
             return new(false, $"変更ファイル数が上限 {MaxFiles} を超えています。", string.Empty);
 
+        var verification = new StringBuilder();
+
         foreach (var change in changes)
         {
             if (change.Content.Length > MaxContentChars)
-                return new(false, $"{change.Path}: 内容が大きすぎます。", string.Empty);
+                return new(false, $"{change.Path}: 内容が大きすぎます。", verification.ToString());
 
             var target = SafePath(root, change.Path);
             if (target is null)
-                return new(false, $"Workspace外への変更を拒否しました: {change.Path}", string.Empty);
+                return new(false, $"Workspace外への変更を拒否しました: {change.Path}", verification.ToString());
 
             if (IsProtectedPath(root, target))
-                return new(false, $"保護対象への変更を拒否しました: {change.Path}", string.Empty);
+                return new(false, $"保護対象への変更を拒否しました: {change.Path}", verification.ToString());
+
+            var existedBefore = File.Exists(target);
+            verification.AppendLine($"FILE: {change.Path}");
+            verification.AppendLine($"ACTION: {change.Action}");
+            verification.AppendLine($"PRECHECK_EXISTS: {existedBefore.ToString().ToLowerInvariant()}");
 
             switch (change.Action)
             {
                 case "CREATE":
-                    if (File.Exists(target))
-                        return new(false, $"CREATE対象が既に存在します: {change.Path}", string.Empty);
+                    if (existedBefore)
+                    {
+                        verification.AppendLine("PRECHECK_RESULT: FAIL (CREATE対象が既に存在)");
+                        return new(false, $"CREATE対象が既に存在します: {change.Path}", verification.ToString());
+                    }
+                    verification.AppendLine("PRECHECK_RESULT: PASS (未存在を確認)");
                     Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                     await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
                     break;
+
                 case "MODIFY":
-                    if (!File.Exists(target))
-                        return new(false, $"MODIFY対象が存在しません: {change.Path}", string.Empty);
+                    if (!existedBefore)
+                    {
+                        verification.AppendLine("PRECHECK_RESULT: FAIL (MODIFY対象が存在しない)");
+                        return new(false, $"MODIFY対象が存在しません: {change.Path}", verification.ToString());
+                    }
+                    verification.AppendLine("PRECHECK_RESULT: PASS (存在を確認)");
                     await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
                     break;
+
                 default:
-                    return new(false, $"未対応ACTIONです: {change.Action}", string.Empty);
+                    return new(false, $"未対応ACTIONです: {change.Action}", verification.ToString());
             }
+
+            var existsAfter = File.Exists(target);
+            verification.AppendLine($"POSTCHECK_EXISTS: {existsAfter.ToString().ToLowerInvariant()}");
+            if (!existsAfter)
+            {
+                verification.AppendLine("POSTCHECK_RESULT: FAIL (書き込み後にファイルが存在しない)");
+                return new(false, $"書き込み後の存在確認に失敗しました: {change.Path}", verification.ToString());
+            }
+
+            var readBack = await File.ReadAllTextAsync(target, Encoding.UTF8, cancellationToken);
+            var exactMatch = string.Equals(readBack, change.Content, StringComparison.Ordinal);
+            verification.AppendLine($"CONTENT_EXACT_MATCH: {exactMatch.ToString().ToLowerInvariant()}");
+            verification.AppendLine($"EXPECTED_LENGTH: {change.Content.Length}");
+            verification.AppendLine($"ACTUAL_LENGTH: {readBack.Length}");
+
+            if (!exactMatch)
+            {
+                verification.AppendLine("POSTCHECK_RESULT: FAIL (内容不一致)");
+                return new(false, $"書き込み後の内容検証に失敗しました: {change.Path}", verification.ToString());
+            }
+
+            verification.AppendLine("POSTCHECK_RESULT: PASS (存在・内容完全一致)");
+            verification.AppendLine();
         }
 
         var test = await RunBuildAsync(root, cancellationToken);
+        verification.AppendLine("BUILD_TEST:");
+        verification.AppendLine($"DOTNET_BUILD_EXIT: {test.ExitCode}");
+        verification.AppendLine(test.Output);
+
         return new(test.ExitCode == 0,
-            $"{changes.Count}ファイルを適用。dotnet build exit={test.ExitCode}",
-            test.Output);
+            $"{changes.Count}ファイルを適用・読み返し検証済み。dotnet build exit={test.ExitCode}",
+            verification.ToString().Trim());
     }
 
     private static IEnumerable<FileChange> ParseChanges(string text)
