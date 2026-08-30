@@ -86,9 +86,9 @@ public sealed class ChatGptWebAdapter
                 initial.UserCount,
                 initial.LatestAssistantText,
                 message);
-            Log(log, "SEND_ACCEPTED", "matching user turn and assistant generation observed");
+            Log(log, "SEND_ACCEPTED", "new user turn and assistant generation observed");
             await FlushLogAsync(log);
-            return new(true, "ACCEPTED", BuildDetail("A matching new user turn and assistant generation were observed."));
+            return new(true, "ACCEPTED", BuildDetail("A new user turn and assistant generation were observed."));
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -136,12 +136,13 @@ public sealed class ChatGptWebAdapter
             for (var i = 0; i < 240; i++)
             {
                 last = await ReadStateAsync(cancellationToken);
-                var matchingUserTurn = TransportTextEquals(last.LatestUserText, baseline.Message);
+                var newUserTurnObserved = last.UserCount > baseline.UserCount;
+                var displayedBodyMatches = TransportTextEquals(last.LatestUserText, baseline.Message);
                 var assistantChanged = !TextEquals(last.LatestAssistantText, baseline.LatestAssistantText);
                 var assistantAdvanced = last.AssistantCount > baseline.AssistantCount || assistantChanged;
                 var hasResponseText = !string.IsNullOrWhiteSpace(last.LatestAssistantText);
 
-                if (matchingUserTurn && assistantAdvanced && hasResponseText)
+                if (newUserTurnObserved && assistantAdvanced && hasResponseText)
                 {
                     if (!last.Generating && string.Equals(stableText, last.LatestAssistantText, StringComparison.Ordinal))
                         stableReads++;
@@ -153,7 +154,7 @@ public sealed class ChatGptWebAdapter
                     {
                         LogState(log, "RESPONSE_READY", last);
                         Log(log, "RESPONSE_ACCEPTED",
-                            $"assistantCountAdvanced={last.AssistantCount > baseline.AssistantCount}; assistantTextChanged={assistantChanged}; responseLength={stableText.Length}");
+                            $"newUserTurn=True; displayedBodyMatches={displayedBodyMatches}; assistantCountAdvanced={last.AssistantCount > baseline.AssistantCount}; assistantTextChanged={assistantChanged}; responseLength={stableText.Length}");
                         _pendingResponse = null;
                         await FlushLogAsync(log);
                         return stableText;
@@ -163,7 +164,7 @@ public sealed class ChatGptWebAdapter
                 if (i == 0 || i == 10 || i == 30 || i == 60 || i == 120 || i == 180)
                 {
                     Log(log, "RESPONSE_WAIT_CHECK",
-                        $"iteration={i}; matchingUser={matchingUserTurn}; assistantCount={last.AssistantCount}; baselineAssistantCount={baseline.AssistantCount}; assistantChanged={assistantChanged}; assistantLength={last.LatestAssistantText.Length}; generating={last.Generating}; stableReads={stableReads}");
+                        $"iteration={i}; newUserTurn={newUserTurnObserved}; displayedBodyMatches={displayedBodyMatches}; assistantCount={last.AssistantCount}; baselineAssistantCount={baseline.AssistantCount}; assistantChanged={assistantChanged}; assistantLength={last.LatestAssistantText.Length}; generating={last.Generating}; stableReads={stableReads}");
                 }
 
                 await Task.Delay(500, cancellationToken);
@@ -197,10 +198,13 @@ public sealed class ChatGptWebAdapter
         {
             await Task.Delay(150, cancellationToken);
             last = await ReadStateAsync(cancellationToken);
-            userObserved |= last.UserCount > baseline.UserCount && TransportTextEquals(last.LatestUserText, message);
+            var bodyMatches = TransportTextEquals(last.LatestUserText, message);
+            userObserved |= last.UserCount > baseline.UserCount;
             if (userObserved && (last.Generating || last.AssistantCount > baseline.AssistantCount))
             {
                 LogState(log, "ACCEPTED_STATE", last);
+                Log(log, "ACCEPTED_COMPARE",
+                    $"displayedBodyMatches={bodyMatches}; expectedTransportLength={NormalizeTransport(message).Length}; latestUserTransportLength={NormalizeTransport(last.LatestUserText).Length}");
                 return new(true, "ACCEPTED", string.Empty);
             }
         }
@@ -211,8 +215,8 @@ public sealed class ChatGptWebAdapter
             Log(log, "ACCEPTANCE_COMPARE", $"expectedNormalizedLength={Normalize(message).Length}; latestUserNormalizedLength={Normalize(last.LatestUserText).Length}; expectedTransportLength={NormalizeTransport(message).Length}; latestUserTransportLength={NormalizeTransport(last.LatestUserText).Length}; latestUserNormalized={EscapeForLog(Normalize(last.LatestUserText))}");
         }
         return userObserved
-            ? new(false, "GENERATION_NOT_STARTED", BuildDetail("The user turn appeared, but assistant generation was not observed."))
-            : new(false, "USER_TURN_NOT_OBSERVED", BuildDetail("No matching new user conversation turn appeared after the single send trigger."));
+            ? new(false, "GENERATION_NOT_STARTED", BuildDetail("A new user turn appeared, but assistant generation was not observed."))
+            : new(false, "USER_TURN_NOT_OBSERVED", BuildDetail("No new user conversation turn appeared after the single send trigger."));
     }
 
     private async Task<bool> FocusComposerAsync(CancellationToken cancellationToken)
