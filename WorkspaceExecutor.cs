@@ -1,5 +1,5 @@
-using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace AiMultiWindow;
@@ -12,8 +12,27 @@ public static class WorkspaceExecutor
     private const int MaxContentChars = 250_000;
     private static readonly List<FileSnapshot> PendingSnapshots = new();
     private static string? PendingRoot;
+    private const string TransactionDirectoryName = ".ai-multi-window";
+    private const string TransactionFileName = "rollback.json";
 
     public static bool HasPendingChanges => PendingSnapshots.Count > 0;
+
+    public static async Task<bool> RecoverPendingAsync(string workspaceRoot)
+    {
+        if (HasPendingChanges) return true;
+        var root = Path.GetFullPath(workspaceRoot);
+        var path = TransactionPath(root);
+        if (!File.Exists(path)) return false;
+        var stored = JsonSerializer.Deserialize<List<PersistedSnapshot>>(await File.ReadAllTextAsync(path, Encoding.UTF8)) ?? [];
+        PendingRoot = root;
+        foreach (var item in stored)
+        {
+            var full = SafePath(root, item.RelativePath);
+            if (full is null || IsProtectedPath(root, full)) throw new InvalidDataException("Invalid rollback transaction path.");
+            PendingSnapshots.Add(new FileSnapshot(full, item.ExistedBefore, item.OriginalContent));
+        }
+        return HasPendingChanges;
+    }
 
     public static async Task<WorkspaceExecutionResult> ApplyCoderResponseAsync(
         string workspaceRoot,
@@ -32,6 +51,9 @@ public static class WorkspaceExecutor
             return new(false, "Coder回答に適用可能な FILE/ACTION/CONTENT がありません。", string.Empty);
         if (changes.Count > MaxFiles)
             return new(false, $"変更ファイル数が上限 {MaxFiles} を超えています。", string.Empty);
+
+        var validationError = ValidateChangeSet(root, changes);
+        if (validationError is not null) return new(false, validationError, string.Empty);
 
         var verification = new StringBuilder();
         PendingRoot = root;
@@ -85,6 +107,7 @@ public static class WorkspaceExecutor
 
                         verification.AppendLine("PRECHECK_RESULT: PASS (未存在を確認)");
                         PendingSnapshots.Add(new FileSnapshot(target, false, null));
+                        await PersistPendingAsync();
                         Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                         await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
                         verification.AppendLine("WRITE_PERFORMED: true");
@@ -112,6 +135,7 @@ public static class WorkspaceExecutor
                         }
 
                         PendingSnapshots.Add(new FileSnapshot(target, true, original));
+                        await PersistPendingAsync();
                         await File.WriteAllTextAsync(target, change.Content, Encoding.UTF8, cancellationToken);
                         verification.AppendLine("WRITE_PERFORMED: true");
                         break;
@@ -144,17 +168,15 @@ public static class WorkspaceExecutor
                 verification.AppendLine();
             }
 
-            var test = await RunBuildAsync(root, cancellationToken);
-            verification.AppendLine("BUILD_TEST:");
-            verification.AppendLine($"DOTNET_BUILD_EXIT: {test.ExitCode}");
-            verification.AppendLine(test.Output);
-
-            if (test.ExitCode != 0)
-                return await FailAndRollbackAsync($"dotnet build に失敗しました。exit={test.ExitCode}", verification.ToString());
+            var provider = WorkspaceVerificationProviderFactory.Create(root);
+            var changedPaths = changes.Select(c => c.Path.Replace('\\', '/')).ToList();
+            var test = await provider.VerifyAsync(root, changedPaths, cancellationToken);
+            verification.AppendLine("LOCAL_VERIFICATION:").AppendLine(test.Output);
+            if (!test.Success) return await FailAndRollbackAsync("ローカルbuild/testに失敗しました。", verification.ToString());
 
             var changedCount = PendingSnapshots.Count;
             return new(true,
-                $"要求状態を検証済み。実変更 {changedCount}ファイル、既に一致 {satisfiedWithoutWrite}ファイル。Reviewer判定待ち。dotnet build exit=0",
+                $"要求状態を検証済み。実変更 {changedCount}ファイル、既に一致 {satisfiedWithoutWrite}ファイル。Reviewer判定待ち。build/test成功",
                 verification.ToString().Trim());
         }
         catch (Exception ex)
@@ -169,6 +191,7 @@ public static class WorkspaceExecutor
             return "ROLLBACK: 対象なし";
 
         var log = new StringBuilder();
+        var failed = new List<FileSnapshot>();
         for (var i = PendingSnapshots.Count - 1; i >= 0; i--)
         {
             var snapshot = PendingSnapshots[i];
@@ -189,17 +212,26 @@ public static class WorkspaceExecutor
             catch (Exception ex)
             {
                 log.AppendLine($"ROLLBACK_FAIL: {RelativePendingPath(snapshot.Path)}: {ex.Message}");
+                failed.Add(snapshot);
             }
         }
 
-        ClearPending();
+        if (failed.Count == 0) ClearPending();
+        else
+        {
+            PendingSnapshots.Clear();
+            PendingSnapshots.AddRange(failed);
+            await PersistPendingAsync();
+        }
         return log.Length == 0 ? "ROLLBACK: 完了" : log.ToString().Trim();
     }
 
     public static string CommitPending()
     {
         var count = PendingSnapshots.Count;
-        ClearPending();
+        if (!TryDeleteTransaction()) return "COMMIT_LOCAL_CHANGES_FAILED: rollback記録を削除できないため確定状態にできません";
+        PendingSnapshots.Clear();
+        PendingRoot = null;
         return $"COMMIT_LOCAL_CHANGES: {count}ファイルを確定";
     }
 
@@ -212,8 +244,23 @@ public static class WorkspaceExecutor
 
     private static void ClearPending()
     {
+        TryDeleteTransaction();
         PendingSnapshots.Clear();
         PendingRoot = null;
+    }
+
+    private static bool TryDeleteTransaction()
+    {
+        if (string.IsNullOrWhiteSpace(PendingRoot)) return true;
+        try
+        {
+            var directory = Path.Combine(PendingRoot, TransactionDirectoryName);
+            var transaction = Path.Combine(directory, TransactionFileName);
+            if (File.Exists(transaction)) File.Delete(transaction);
+            if (Directory.Exists(directory) && !Directory.EnumerateFileSystemEntries(directory).Any()) Directory.Delete(directory);
+            return !File.Exists(transaction);
+        }
+        catch { return false; }
     }
 
     private static string RelativePendingPath(string path)
@@ -246,32 +293,49 @@ public static class WorkspaceExecutor
         return relative.StartsWith(".git/", StringComparison.OrdinalIgnoreCase)
             || relative.Equals(".git", StringComparison.OrdinalIgnoreCase)
             || relative.StartsWith("bin/", StringComparison.OrdinalIgnoreCase)
-            || relative.StartsWith("obj/", StringComparison.OrdinalIgnoreCase);
+            || relative.StartsWith("obj/", StringComparison.OrdinalIgnoreCase)
+            || relative.StartsWith(TransactionDirectoryName + "/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static async Task<(int ExitCode, string Output)> RunBuildAsync(string root, CancellationToken cancellationToken)
+    private static string? ValidateChangeSet(string root, IReadOnlyList<FileChange> changes)
     {
-        var psi = new ProcessStartInfo
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var change in changes)
         {
-            FileName = "dotnet",
-            Arguments = "build --nologo",
-            WorkingDirectory = root,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+            var target = SafePath(root, change.Path);
+            if (target is null || IsProtectedPath(root, target)) return $"不正または保護対象のパスです: {change.Path}";
+            if (!seen.Add(target)) return $"同一ファイルが複数回指定されています: {change.Path}";
+            if (HasReparsePointBetween(root, target)) return $"reparse point経由の変更を拒否しました: {change.Path}";
+            if (change.Action == "CREATE" && File.Exists(target) && !string.Equals(File.ReadAllText(target), change.Content, StringComparison.Ordinal)) return $"CREATE対象が既に存在します: {change.Path}";
+            if (change.Action == "MODIFY" && !File.Exists(target)) return $"MODIFY対象が存在しません: {change.Path}";
+        }
+        return null;
+    }
 
-        using var process = Process.Start(psi);
-        if (process is null) return (-1, "dotnet build を開始できませんでした。");
-        var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        var output = (await stdout) + Environment.NewLine + (await stderr);
-        if (output.Length > 20_000) output = output[^20_000..];
-        return (process.ExitCode, output.Trim());
+    private static bool HasReparsePointBetween(string root, string target)
+    {
+        var current = File.Exists(target) ? target : Path.GetDirectoryName(target);
+        while (!string.IsNullOrWhiteSpace(current) && !string.Equals(current, root, StringComparison.OrdinalIgnoreCase))
+        {
+            if (File.Exists(current) || Directory.Exists(current))
+                if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+            current = Path.GetDirectoryName(current);
+        }
+        return false;
+    }
+
+    private static string TransactionPath(string root) => Path.Combine(root, TransactionDirectoryName, TransactionFileName);
+
+    private static async Task PersistPendingAsync()
+    {
+        if (string.IsNullOrWhiteSpace(PendingRoot)) return;
+        var path = TransactionPath(PendingRoot);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var stored = PendingSnapshots.Select(s => new PersistedSnapshot(Path.GetRelativePath(PendingRoot, s.Path), s.ExistedBefore, s.OriginalContent)).ToList();
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(stored), Encoding.UTF8);
     }
 
     private sealed record FileChange(string Path, string Action, string Content);
     private sealed record FileSnapshot(string Path, bool ExistedBefore, string? OriginalContent);
+    private sealed record PersistedSnapshot(string RelativePath, bool ExistedBefore, string? OriginalContent);
 }

@@ -15,6 +15,8 @@ public partial class MainWindow : Window
     private bool _isFullscreen;
     private WindowStyle _previousWindowStyle;
     private WindowState _previousWindowState;
+    private readonly SemaphoreSlim _workflowLock = new(1, 1);
+    private CancellationTokenSource? _workflowCancellation;
 
     public MainWindow()
     {
@@ -90,6 +92,12 @@ public partial class MainWindow : Window
 
     private async void StartOrchestration_Click(object sender, RoutedEventArgs e)
     {
+        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
+        try
+        {
+        _workflowCancellation?.Cancel();
+        _workflowCancellation?.Dispose();
+        _workflowCancellation = new CancellationTokenSource();
         var task = TaskTextBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(task)) { StatusText.Text = "依頼を入力してください"; return; }
 
@@ -100,6 +108,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        await WorkspaceExecutor.RecoverPendingAsync(workspace);
         if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
 
         StatusText.Text = "Workspaceの実コードを読み込み中...";
@@ -107,31 +116,48 @@ public partial class MainWindow : Window
         _orchestrator.Start(task, workspaceContext);
         ApplyLayout(4);
         UpdateOrchestratorUi();
-        await SendCurrentStepAsync();
+        await RunAutomaticWorkflowAsync(_workflowCancellation.Token);
+        }
+        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; }
+        finally { _workflowLock.Release(); }
     }
 
     private async void StopOrchestration_Click(object sender, RoutedEventArgs e)
     {
+        _workflowCancellation?.Cancel();
+        await _workflowLock.WaitAsync();
+        try
+        {
         if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
         if (_orchestrator.State == WorkflowState.Running) _orchestrator.Stop("ユーザーが停止しました");
         UpdateOrchestratorUi(); StatusText.Text = "司令塔を停止しました。未確定変更はロールバックしました。";
+        }
+        finally { _workflowLock.Release(); }
     }
 
     private async void ResetOrchestration_Click(object sender, RoutedEventArgs e)
     {
+        _workflowCancellation?.Cancel();
+        await _workflowLock.WaitAsync();
+        try
+        {
         if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
         _orchestrator.Reset(); TaskTextBox.Clear(); UpdateOrchestratorUi(); StatusText.Text = "司令塔をリセットしました。未確定変更はロールバックしました。";
+        }
+        finally { _workflowLock.Release(); }
     }
 
     private async void CaptureAndAdvance_Click(object sender, RoutedEventArgs e)
     {
-        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "実行中のタスクがありません"; return; }
+        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
+        var cancellationToken = _workflowCancellation?.Token ?? CancellationToken.None;
+        if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "実行中のタスクがありません"; _workflowLock.Release(); return; }
         var role = _orchestrator.CurrentRole; var pane = _panes[(int)role];
         CaptureNextButton.IsEnabled = false; CaptureNextButton.Content = "回答取得中..."; StatusText.Text = $"{role} の回答を取得中...";
 
         try
         {
-            var answer = await pane.GetLatestAnswerAsync();
+            var answer = await pane.GetLatestAnswerAsync(cancellationToken);
             if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; return; }
 
             if (role == AgentRole.Coder)
@@ -140,9 +166,15 @@ public partial class MainWindow : Window
                 StatusText.Text = "Coder変更をWorkspaceへ適用してビルド中...";
                 var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(workspace, answer);
                 var executionText = execution.Summary + Environment.NewLine + execution.TestOutput;
-                _orchestrator.SetExecutionResult(executionText);
+                _orchestrator.SetExecutionResult(executionText, execution.Success);
                 if (!execution.Success)
                     StatusText.Text = "ローカル適用/ビルドに失敗。変更をロールバックし、Reviewerへ結果を渡します。";
+            }
+
+            if (role == AgentRole.Planner)
+            {
+                var coderContext = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
+                _orchestrator.SetCoderWorkspaceContext(coderContext);
             }
 
             var advanced = _orchestrator.RecordAnswer(answer);
@@ -153,12 +185,15 @@ public partial class MainWindow : Window
                 {
                     var commitResult = WorkspaceExecutor.CommitPending();
                     _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + commitResult);
+                    if (commitResult.Contains("FAILED", StringComparison.Ordinal)) _orchestrator.Stop(commitResult);
                 }
                 else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
                 {
                     var rollbackResult = await WorkspaceExecutor.RollbackPendingAsync();
                     _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + rollbackResult);
                     StatusText.Text = "Reviewer FAIL — 今回の変更をロールバックしてCoderへ戻します。";
+                    var refreshed = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), _orchestrator.GetAnswer(AgentRole.Planner), cancellationToken);
+                    _orchestrator.SetCoderWorkspaceContext(refreshed);
                 }
                 else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
                 {
@@ -170,19 +205,27 @@ public partial class MainWindow : Window
             if (_orchestrator.State == WorkflowState.Success) { StatusText.Text = "レビューPASS — ローカル変更を確定してワークフロー完了"; return; }
             if (_orchestrator.State == WorkflowState.Stopped) { StatusText.Text = _orchestrator.StopReason; return; }
             if (!advanced) { StatusText.Text = "回答を処理できなかったため停止しました"; return; }
-            await SendCurrentStepAsync();
+            await SendCurrentStepAsync(cancellationToken);
         }
+        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; }
         finally
         {
             CaptureNextButton.Content = "回答取得 → 次工程";
             CaptureNextButton.IsEnabled = _orchestrator.State == WorkflowState.Running;
+            _workflowLock.Release();
         }
     }
 
     private async void ResendCurrent_Click(object sender, RoutedEventArgs e)
     {
+        if (!await _workflowLock.WaitAsync(0)) { StatusText.Text = "別の処理を実行中です"; return; }
+        try
+        {
         if (_orchestrator.State != WorkflowState.Running) { StatusText.Text = "再送できる実行中タスクがありません"; return; }
-        await SendCurrentStepAsync();
+        await RunAutomaticWorkflowAsync(_workflowCancellation?.Token ?? CancellationToken.None);
+        }
+        catch (OperationCanceledException) { StatusText.Text = "処理をキャンセルしました"; }
+        finally { _workflowLock.Release(); }
     }
 
     private void ChatGptMode_Click(object sender, RoutedEventArgs e)
@@ -192,30 +235,80 @@ public partial class MainWindow : Window
         _settings.Save(); ApplyLayout(4); StatusText.Text = "4ペインを独立ChatGPTプロファイルに設定しました";
     }
 
-    private async Task SendCurrentStepAsync()
+    private async Task<bool> SendCurrentStepAsync(CancellationToken cancellationToken)
     {
-        if (_orchestrator.State != WorkflowState.Running) return;
-        if (!_orchestrator.MarkPromptSent()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; return; }
+        if (_orchestrator.State != WorkflowState.Running) return false;
+        if (!_orchestrator.TryBeginPromptAttempt()) { UpdateOrchestratorUi(); StatusText.Text = _orchestrator.StopReason; return false; }
         var role = _orchestrator.CurrentRole; var pane = _panes[(int)role]; var prompt = _orchestrator.BuildCurrentPrompt();
         StatusText.Text = $"{role} へ送信中...";
 
-        var sent = await pane.SendMessageAsync(prompt);
-        if (!sent)
-        {
-            StatusText.Text = $"{role} の通常送信に失敗。実キーEnter送信を試行中...";
-            sent = await pane.TrySendPhysicalEnterAsync();
-        }
+        var sent = await pane.SendMessageAsync(prompt, cancellationToken);
+        if (sent) _orchestrator.RecordPromptAccepted();
 
         StatusText.Text = sent
             ? $"{role} へ送信済み。回答完成後に「回答取得 → 次工程」を押してください。"
-            : $"{role} への自動送信に失敗しました。入力済みの文章を確認して手動でEnterを押してください。";
+            : $"{role} への自動送信に失敗しました。状態を確認して再送してください。";
         UpdateOrchestratorUi();
+        return sent;
+    }
+
+    private async Task RunAutomaticWorkflowAsync(CancellationToken cancellationToken)
+    {
+        while (_orchestrator.State == WorkflowState.Running)
+        {
+            var sent = await SendCurrentStepAsync(cancellationToken);
+            if (_orchestrator.State != WorkflowState.Running) return;
+            var role = _orchestrator.CurrentRole;
+            if (!sent) return; // Leave the workflow resumable for an explicit retry.
+
+            StatusText.Text = $"{role} の回答完了を待機中...";
+            var answer = await _panes[(int)role].GetLatestAnswerAsync(cancellationToken);
+            if (string.IsNullOrWhiteSpace(answer)) { StatusText.Text = $"{role} の回答を取得できませんでした"; return; }
+
+            if (role == AgentRole.Planner)
+            {
+                var context = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
+                _orchestrator.SetCoderWorkspaceContext(context);
+            }
+            if (role == AgentRole.Coder)
+            {
+                StatusText.Text = "Coder変更を適用し、build/testを実行中...";
+                var execution = await WorkspaceExecutor.ApplyCoderResponseAsync(WorkspaceTextBox.Text.Trim(), answer, cancellationToken);
+                _orchestrator.SetExecutionResult(execution.Summary + Environment.NewLine + execution.TestOutput, execution.Success);
+            }
+
+            var advanced = _orchestrator.RecordAnswer(answer);
+            if (role == AgentRole.Reviewer)
+            {
+                if (_orchestrator.State == WorkflowState.Success)
+                {
+                    var commit = WorkspaceExecutor.CommitPending();
+                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + commit);
+                    if (commit.Contains("FAILED", StringComparison.Ordinal)) _orchestrator.Stop(commit);
+                }
+                else if (_orchestrator.State == WorkflowState.Running && _orchestrator.CurrentRole == AgentRole.Coder)
+                {
+                    var rollback = await WorkspaceExecutor.RollbackPendingAsync();
+                    _orchestrator.SetExecutionResult(_orchestrator.ExecutionResult + Environment.NewLine + rollback);
+                    var refreshed = await WorkspaceContextBuilder.BuildCoderAsync(WorkspaceTextBox.Text.Trim(), _orchestrator.GetAnswer(AgentRole.Planner), cancellationToken);
+                    _orchestrator.SetCoderWorkspaceContext(refreshed);
+                }
+                else if (_orchestrator.State == WorkflowState.Stopped && WorkspaceExecutor.HasPendingChanges)
+                    await WorkspaceExecutor.RollbackPendingAsync();
+            }
+            UpdateOrchestratorUi();
+            if (!advanced || _orchestrator.State != WorkflowState.Running)
+            {
+                StatusText.Text = _orchestrator.State == WorkflowState.Success ? "レビューPASS — ローカル変更を確定して完了" : _orchestrator.StopReason;
+                return;
+            }
+        }
     }
 
     private void UpdateOrchestratorUi()
     {
         WorkflowStateText.Text = $"State: {_orchestrator.State}"; CurrentRoleText.Text = $"Role: {_orchestrator.CurrentRole}";
-        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls}"; FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}"; StopReasonText.Text = _orchestrator.StopReason;
+        AiCallsText.Text = $"AI Calls: {_orchestrator.AiCalls} / {_orchestrator.MaxAiCalls} (試行 {_orchestrator.SendAttempts})"; FixAttemptsText.Text = $"Fix: {_orchestrator.FixAttempts} / {_orchestrator.MaxFixAttempts}"; StopReasonText.Text = _orchestrator.StopReason;
         var running = _orchestrator.State == WorkflowState.Running; CaptureNextButton.IsEnabled = running; ResendButton.IsEnabled = running;
     }
 

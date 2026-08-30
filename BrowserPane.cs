@@ -11,6 +11,7 @@ public sealed class BrowserPane : Grid
 {
     private readonly TextBox _addressBar;
     private readonly WebView2 _webView;
+    private ChatGptWebAdapter? _chatAdapter;
     private readonly Button _backButton;
     private readonly Button _forwardButton;
     private readonly TextBox _promptBox;
@@ -198,6 +199,7 @@ public sealed class BrowserPane : Grid
             core.Settings.AreDevToolsEnabled = true;
             core.Settings.AreDefaultContextMenusEnabled = true;
             core.Settings.IsZoomControlEnabled = true;
+            _chatAdapter = new ChatGptWebAdapter(core);
             core.HistoryChanged += (_, _) => UpdateNavigationButtons();
             core.NavigationCompleted += (_, _) =>
             {
@@ -215,261 +217,28 @@ public sealed class BrowserPane : Grid
         }
     }
 
-    public async Task<bool> SendMessageAsync(string message)
+    public async Task<bool> SendMessageAsync(string message, CancellationToken cancellationToken = default)
     {
-        if (_webView.CoreWebView2 is null || string.IsNullOrWhiteSpace(message))
-            return false;
-
-        _aiStatus.Text = "入力中";
-        var messageJson = JsonSerializer.Serialize(message);
-        var fillScript = $$"""
-            (() => {
-                const message = {{messageJson}};
-                const selectors = [
-                    '#prompt-textarea',
-                    'textarea[placeholder]',
-                    'textarea',
-                    '[contenteditable="true"][role="textbox"]',
-                    '[contenteditable="true"]'
-                ];
-
-                let input = null;
-                for (const selector of selectors) {
-                    input = Array.from(document.querySelectorAll(selector)).find(el => {
-                        const r = el.getBoundingClientRect();
-                        return r.width > 20 && r.height > 10 && !el.disabled;
-                    });
-                    if (input) break;
-                }
-                if (!input) return 'ERROR:NO_INPUT';
-
-                input.focus();
-                if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-                    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                    if (setter) setter.call(input, message); else input.value = message;
-                    input.dispatchEvent(new Event('input', { bubbles: true }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                } else {
-                    input.textContent = '';
-                    input.focus();
-                    document.execCommand('insertText', false, message);
-                    if (!(input.innerText || input.textContent || '').trim()) input.textContent = message;
-                    input.dispatchEvent(new InputEvent('input', {
-                        bubbles: true,
-                        composed: true,
-                        inputType: 'insertText',
-                        data: message
-                    }));
-                    input.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                return 'OK:FILLED';
-            })();
-            """;
-
-        const string clickSendScript = """
-            (() => {
-                const visible = el => {
-                    if (!el) return false;
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
-                };
-                const input = document.querySelector('#prompt-textarea')
-                    || document.querySelector('[contenteditable="true"][role="textbox"]')
-                    || document.querySelector('textarea');
-
-                const scopes = [];
-                if (input) {
-                    const form = input.closest('form');
-                    if (form) scopes.push(form);
-                    if (input.parentElement) scopes.push(input.parentElement);
-                }
-                scopes.push(document);
-
-                const selectors = [
-                    'button[data-testid="send-button"]',
-                    'button[data-testid*="send"]',
-                    'button[aria-label*="Send"]',
-                    'button[aria-label*="send"]',
-                    'button[aria-label*="送信"]',
-                    'button[title*="Send"]',
-                    'button[title*="send"]',
-                    'button[title*="送信"]',
-                    'button[type="submit"]'
-                ];
-
-                for (const scope of scopes) {
-                    for (const selector of selectors) {
-                        const button = Array.from(scope.querySelectorAll(selector))
-                            .find(btn => !btn.disabled && visible(btn));
-                        if (button) {
-                            button.focus();
-                            button.click();
-                            return 'TRIGGER:BUTTON';
-                        }
-                    }
-                }
-                return 'NO_SEND_BUTTON';
-            })();
-            """;
-
-        const string enterSendScript = """
-            (() => {
-                const input = document.querySelector('#prompt-textarea')
-                    || document.querySelector('[contenteditable="true"][role="textbox"]')
-                    || document.querySelector('textarea');
-                if (!input) return 'ERROR:NO_INPUT';
-                input.focus();
-                const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-                input.dispatchEvent(new KeyboardEvent('keydown', options));
-                input.dispatchEvent(new KeyboardEvent('keypress', options));
-                input.dispatchEvent(new KeyboardEvent('keyup', options));
-                return 'TRIGGER:ENTER';
-            })();
-            """;
-
-        const string verifySentScript = """
-            (() => {
-                const input = document.querySelector('#prompt-textarea')
-                    || document.querySelector('[contenteditable="true"][role="textbox"]')
-                    || document.querySelector('textarea');
-                if (!input) return 'OK:INPUT_REMOVED';
-                const text = input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement
-                    ? input.value
-                    : (input.innerText || input.textContent || '');
-                return text.trim().length === 0 ? 'OK:CLEARED' : 'WAIT:STILL_FILLED';
-            })();
-            """;
-
-        try
-        {
-            var fillRaw = await ExecuteScriptWithRetryAsync(fillScript, 8);
-            var fillResult = JsonSerializer.Deserialize<string>(fillRaw) ?? string.Empty;
-            if (fillResult != "OK:FILLED")
-            {
-                _aiStatus.Text = $"送信失敗: {fillResult}";
-                return false;
-            }
-
-            _aiStatus.Text = "送信中";
-            await Task.Delay(350);
-            var clickRaw = await ExecuteScriptWithRetryAsync(clickSendScript, 4);
-            var clickResult = JsonSerializer.Deserialize<string>(clickRaw) ?? string.Empty;
-
-            if (clickResult == "TRIGGER:BUTTON" && await WaitForComposerClearedAsync(verifySentScript))
-            {
-                _aiStatus.Text = "送信済";
-                return true;
-            }
-
-            // ChatGPT側のDOM変更で送信ボタンを特定できない場合はEnter送信へ切り替える。
-            // Enterを押しただけでは成功扱いにせず、入力欄が実際に空になったことまで確認する。
-            _aiStatus.Text = "Enter送信を試行";
-            var enterRaw = await ExecuteScriptWithRetryAsync(enterSendScript, 4);
-            var enterResult = JsonSerializer.Deserialize<string>(enterRaw) ?? string.Empty;
-            if (enterResult == "TRIGGER:ENTER" && await WaitForComposerClearedAsync(verifySentScript))
-            {
-                _aiStatus.Text = "送信済";
-                return true;
-            }
-
-            _aiStatus.Text = "送信失敗: 入力欄が送信後も残っています";
-            return false;
-        }
-        catch (Exception ex)
-        {
-            _aiStatus.Text = $"送信失敗: {ex.GetType().Name}";
-            _aiStatus.ToolTip = ex.Message;
-            return false;
-        }
+        if (_chatAdapter is null || string.IsNullOrWhiteSpace(message)) return false;
+        _aiStatus.Text = "送信中";
+        var result = await _chatAdapter.SendAsync(message, cancellationToken);
+        _aiStatus.Text = result.Success ? "送信済" : $"送信失敗: {result.Code}";
+        _aiStatus.ToolTip = result.Detail;
+        return result.Success;
     }
 
-    private async Task<bool> WaitForComposerClearedAsync(string verifyScript)
+    public async Task<string?> GetLatestAnswerAsync(CancellationToken cancellationToken = default)
     {
-        for (var attempt = 0; attempt < 10; attempt++)
-        {
-            await Task.Delay(attempt == 0 ? 250 : 200);
-            var raw = await ExecuteScriptWithRetryAsync(verifyScript, 4);
-            var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
-            if (result.StartsWith("OK:", StringComparison.Ordinal))
-                return true;
-        }
-        return false;
-    }
-
-    public async Task<string?> GetLatestAnswerAsync()
-    {
-        if (_webView.CoreWebView2 is null)
+        if (_chatAdapter is null)
         {
             _aiStatus.Text = "取得失敗: WebView未準備";
             return null;
         }
 
-        const string script = """
-            (() => {
-                const visible = el => {
-                    if (!el) return false;
-                    const r = el.getBoundingClientRect();
-                    return r.width > 0 && r.height > 0;
-                };
-
-                const candidates = [];
-                const selectors = [
-                    '[data-message-author-role="assistant"]',
-                    '[data-content-source="assistant"]',
-                    '[data-turn="assistant"]',
-                    'main article[data-testid*="conversation-turn"]'
-                ];
-
-                for (const selector of selectors) {
-                    for (const el of document.querySelectorAll(selector)) {
-                        if (!visible(el)) continue;
-                        const role = el.getAttribute('data-message-author-role');
-                        if (role && role !== 'assistant') continue;
-                        const text = (el.innerText || '').trim();
-                        if (text.length > 0) candidates.push({ el, text });
-                    }
-                }
-
-                if (candidates.length === 0) {
-                    const markdown = Array.from(document.querySelectorAll('main .markdown, main [class*="markdown"]'))
-                        .filter(visible)
-                        .map(el => ({ el, text: (el.innerText || '').trim() }))
-                        .filter(x => x.text.length > 0);
-                    if (markdown.length > 0) return markdown[markdown.length - 1].text;
-                    return '';
-                }
-
-                const unique = [];
-                const seen = new Set();
-                for (const item of candidates) {
-                    if (seen.has(item.el)) continue;
-                    seen.add(item.el);
-                    unique.push(item);
-                }
-                return unique[unique.length - 1].text;
-            })();
-            """;
-
         try
         {
             _aiStatus.Text = "取得中";
-            var raw = await ExecuteScriptWithRetryAsync(script, 5);
-            if (string.IsNullOrWhiteSpace(raw) || raw is "null" or "undefined")
-            {
-                _aiStatus.Text = "回答なし";
-                return null;
-            }
-
-            string? text;
-            try
-            {
-                text = JsonSerializer.Deserialize<string>(raw);
-            }
-            catch (JsonException)
-            {
-                text = raw.Trim('"');
-            }
+            var text = await _chatAdapter.WaitForLatestResponseAsync(cancellationToken);
 
             _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
@@ -488,29 +257,6 @@ public sealed class BrowserPane : Grid
             _aiStatus.ToolTip = message;
             return null;
         }
-    }
-
-    private async Task<string> ExecuteScriptWithRetryAsync(string script, int timeoutSeconds)
-    {
-        Exception? last = null;
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            try
-            {
-                if (_webView.CoreWebView2 is null)
-                    throw new InvalidOperationException("WebView2 is not initialized.");
-
-                return await _webView.CoreWebView2.ExecuteScriptAsync(script)
-                    .WaitAsync(TimeSpan.FromSeconds(timeoutSeconds));
-            }
-            catch (Exception ex) when (attempt < 2)
-            {
-                last = ex;
-                await Task.Delay(250 * (attempt + 1));
-            }
-        }
-
-        throw last ?? new InvalidOperationException("Script execution failed.");
     }
 
     private async Task SendPromptAsync()

@@ -103,7 +103,7 @@
                     <TextBlock Margin="0,14,0,0"
                                Foreground="#6B7280"
                                TextWrapping="Wrap"
-                               Text="自動ポーリングは行いません。回答が完成したら「回答取得 → 次工程」を押してください。Coder回答取得時はWorkspaceへ変更を適用し、dotnet build結果をReviewerへ渡します。"/>
+                               Text="開始後は回答完成を検出して次工程へ自動進行します。送信失敗やタイムアウト時は再送・回答取得で再開できます。Coder変更はWorkspaceへ適用し、build/test/diffをReviewerへ渡します。"/>
                 </StackPanel>
             </ScrollViewer>
         </Border>
