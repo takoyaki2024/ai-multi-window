@@ -94,9 +94,28 @@ public sealed class OrchestrationEngine
 
         switch (CurrentRole)
         {
-            case AgentRole.Manager: CurrentRole = AgentRole.Planner; break;
-            case AgentRole.Planner: CurrentRole = AgentRole.Coder; break;
-            case AgentRole.Coder: CurrentRole = AgentRole.Reviewer; break;
+            case AgentRole.Manager:
+                CurrentRole = AgentRole.Planner;
+                break;
+            case AgentRole.Planner:
+                CurrentRole = AgentRole.Coder;
+                break;
+            case AgentRole.Coder:
+                if (!LastExecutionSucceeded)
+                {
+                    FixAttempts++;
+                    if (FixAttempts >= MaxFixAttempts)
+                    {
+                        Stop("ローカルbuild/test失敗の修正回数上限に達しました");
+                        return false;
+                    }
+                    CurrentRole = AgentRole.Coder;
+                }
+                else
+                {
+                    CurrentRole = AgentRole.Reviewer;
+                }
+                break;
             case AgentRole.Reviewer:
                 if (ReviewerVerdict(normalized) == ReviewVerdict.Pass && !LastExecutionSucceeded)
                 {
@@ -156,6 +175,10 @@ public sealed class OrchestrationEngine
             ファイル全文
             CONTENT
 
+            重要: <<<CONTENT と CONTENT の間にはファイルそのものだけを書いてください。
+            ```xml や ```csharp などのMarkdownコードフェンス、説明文、ファイル名見出しを混ぜてはいけません。
+            XAML/XMLは単一の正しいルート要素で閉じ、終了タグより後ろに余分な文字を置いてはいけません。
+            ローカルbuild/testが失敗した場合は LOCAL_EXECUTION_FEEDBACK を最優先で読み、同じ失敗を繰り返さず修正してください。
             説明だけで終わらず、実装が必要なら必ず上記ブロックを出してください。
             Reviewerから修正指摘がある場合は必ず反映してください。
             最後に CODER_DONE と書いてください。
@@ -168,6 +191,9 @@ public sealed class OrchestrationEngine
 
             REVIEW_FEEDBACK:
             {GetAnswer(AgentRole.Reviewer)}
+
+            LOCAL_EXECUTION_FEEDBACK:
+            {ExecutionResult}
 
             WORKSPACE_CONTEXT:
             {CoderWorkspaceContext}
