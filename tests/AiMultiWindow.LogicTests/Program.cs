@@ -8,7 +8,9 @@ var tests = new (string Name, Func<Task> Run)[]
     ("reviewer-unknown-stops", ReviewerUnknownStops),
     ("failed-local-verification-rejects-pass", FailedVerificationRejectsPass),
     ("coder-context-is-current-step-scoped", CoderContextIsCurrentStepScoped),
-    ("step-rollback-preserves-committed-step", StepRollbackPreservesCommittedStep)
+    ("step-rollback-preserves-committed-step", StepRollbackPreservesCommittedStep),
+    ("no-safe-match-duplicate-escalates-repair", NoSafeMatchDuplicateEscalatesRepair),
+    ("failed-patch-repairs-through-reviewer", FailedPatchRepairsThroughReviewer)
 };
 
 var failures = 0;
@@ -109,13 +111,87 @@ static async Task StepRollbackPreservesCommittedStep()
         await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
         await File.WriteAllTextAsync(Path.Combine(root, "Value.cs"), "public static class Value { public const int Number = 1; }");
         var first = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Patch("Value.cs", "Number = 1", "Number = 2"));
-        Assert(first.Success, "first step verifies");
+        Assert(first.Success, $"first step verifies: {first.Summary}\n{first.TestOutput}");
         Assert(!WorkspaceExecutor.CommitPending().Contains("FAILED", StringComparison.Ordinal), "first step commits");
         var second = await WorkspaceExecutor.ApplyCoderResponseAsync(root, Patch("Value.cs", "Number = 2", "Number = ;"));
         Assert(!second.Success, "broken second step fails verification");
         var content = await File.ReadAllTextAsync(Path.Combine(root, "Value.cs"));
         Assert(content.Contains("Number = 2"), "failed step rolled back without reverting committed step");
         Assert(!WorkspaceExecutor.HasPendingChanges, "rollback boundary cleared");
+    }
+    finally
+    {
+        if (WorkspaceExecutor.HasPendingChanges) await WorkspaceExecutor.RollbackPendingAsync();
+        Directory.Delete(root, true);
+    }
+}
+
+static Task NoSafeMatchDuplicateEscalatesRepair()
+{
+    var e = AtCoderWithTwoSteps();
+    const string failedAnswer = "FILE: A.cs\nACTION: PATCH\n<<<SEARCH\nold text that is not present\nSEARCH\n<<<REPLACE\nnew text\nREPLACE\nCODER_DONE";
+    const string noSafeMatch = "PATCH_MATCH_MODE: NO_SAFE_MATCH\nPATCHのSEARCHを安全に一意特定できません: A.cs (matches=0, mode=NO_SAFE_MATCH)";
+
+    e.SetExecutionResult(noSafeMatch, false);
+    Assert(e.RecordAnswer(failedAnswer), "first failed patch enters repair");
+    var firstRepairPrompt = e.BuildCurrentPrompt();
+    Assert(firstRepairPrompt.Contains("PREVIOUS_FAILED_CODER_ATTEMPT:") && firstRepairPrompt.Contains(failedAnswer), "repair prompt includes previous failed coder answer");
+    Assert(firstRepairPrompt.Contains("同じSEARCH文字列は絶対に再利用しない"), "repair prompt forbids reusing the failed SEARCH");
+    Assert(firstRepairPrompt.Contains("1〜3行程度の短い一意なSEARCH"), "repair prompt requires short exact SEARCH from latest file");
+    Assert(!string.IsNullOrWhiteSpace(e.PreviousPatchSearchHash), "failed SEARCH hash recorded");
+
+    e.SetExecutionResult(noSafeMatch, false);
+    Assert(e.RecordAnswer(failedAnswer), "duplicate failed answer escalates instead of duplicate stop");
+    Assert(e.State == WorkflowState.Running && e.CurrentRole == AgentRole.Coder, "duplicate repair remains running");
+    Assert(e.RetryStrategy == "ESCALATE_TO_MODIFY_IF_COMPLETE_FILE", "duplicate selects next repair strategy");
+    Assert(e.CoderRepairAttempt == 2 && e.FixAttempts == 2, "repair remains bounded by existing fix counter");
+    Assert(e.BuildCurrentPrompt().Contains("ESCALATE_TO_MODIFY_IF_COMPLETE_FILE"), "escalated strategy is explicit in next prompt");
+    e.SetExecutionResult(noSafeMatch, false);
+    Assert(!e.RecordAnswer(failedAnswer), "third failed repair reaches existing fix limit");
+    Assert(e.State == WorkflowState.Stopped && e.StopReason.Contains("修正回数上限"), "loop stops by MaxFixAttempts, not generic duplicate blocking");
+    Assert(!e.StopReason.Contains("同一回答"), "duplicate stop reason is not used for repair loop");
+    return Task.CompletedTask;
+}
+
+static async Task FailedPatchRepairsThroughReviewer()
+{
+    var root = TempRoot();
+    try
+    {
+        await File.WriteAllTextAsync(Path.Combine(root, "Sample.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>");
+        await File.WriteAllTextAsync(Path.Combine(root, "Value.cs"), "public static class Value { public const int Number = 1; }");
+        await File.WriteAllTextAsync(Path.Combine(root, "Other.cs"), "public static class Other { public const int Number = 10; }");
+
+        var e = new OrchestrationEngine();
+        e.Start("task");
+        e.RecordAnswer("MANAGER_DONE");
+        e.RecordAnswer("STEP: 1\nFILES: Value.cs\nTASK: update Value\nSTEP_END\nSTEP: 2\nFILES: Other.cs\nTASK: update Other\nSTEP_END\nPLAN_DONE");
+
+        var failedAnswer = Patch("Value.cs", "Number = 999", "Number = 2");
+        var failed = await WorkspaceExecutor.ApplyCoderResponseAsync(root, failedAnswer);
+        Assert(!failed.Success && failed.TestOutput.Contains("PATCH_MATCH_MODE: NO_SAFE_MATCH"), "first PATCH fails with NO_SAFE_MATCH");
+        e.SetExecutionResult(failed.Summary + "\n" + failed.TestOutput, false);
+        Assert(e.RecordAnswer(failedAnswer), "failed patch returns to same coder step");
+        e.SetCoderWorkspaceContext(await WorkspaceContextBuilder.BuildCoderAsync(root, e.CurrentImplementationStep));
+        Assert(e.CoderWorkspaceContext.Contains("Number = 1"), "repair context is regenerated from current disk");
+
+        var repairedAnswer = Patch("Value.cs", "Number = 1", "Number = 2");
+        var repaired = await WorkspaceExecutor.ApplyCoderResponseAsync(root, repairedAnswer);
+        Assert(repaired.Success, $"new valid PATCH passes build/test: {repaired.Summary}\n{repaired.TestOutput}");
+        var firstCommit = WorkspaceExecutor.CommitPending();
+        Assert(!firstCommit.Contains("FAILED", StringComparison.Ordinal), "repaired step commits");
+        e.SetExecutionResult(repaired.Summary + "\n" + repaired.TestOutput + "\n" + firstCommit, true);
+        Assert(e.RecordAnswer(repairedAnswer), "repaired step advances");
+        Assert(e.CurrentRole == AgentRole.Coder && e.CoderStepNumber == 2, "next coder step selected");
+
+        var finalAnswer = Patch("Other.cs", "Number = 10", "Number = 11");
+        var final = await WorkspaceExecutor.ApplyCoderResponseAsync(root, finalAnswer);
+        Assert(final.Success, "final step passes build/test");
+        var finalCommit = WorkspaceExecutor.CommitPending();
+        Assert(!finalCommit.Contains("FAILED", StringComparison.Ordinal), "final step commits");
+        e.SetExecutionResult(final.Summary + "\n" + final.TestOutput + "\n" + finalCommit, true);
+        Assert(e.RecordAnswer(finalAnswer), "final coder answer accepted");
+        Assert(e.CurrentRole == AgentRole.Reviewer && e.State == WorkflowState.Running, "final successful step transitions 3 -> 4");
     }
     finally
     {
@@ -153,5 +229,11 @@ static void Accept(OrchestrationEngine e, string answer)
 }
 
 static string Patch(string path, string search, string replace) => $"FILE: {path}\nACTION: PATCH\n<<<SEARCH\n{search}\nSEARCH\n<<<REPLACE\n{replace}\nREPLACE\nCODER_DONE";
-static string TempRoot() { var path = Path.Combine(Path.GetTempPath(), "AiMultiWindowTests", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(path); return path; }
+static string TempRoot()
+{
+    var path = Path.Combine(Path.GetTempPath(), "AiMultiWindowTests", Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(path);
+    File.WriteAllText(Path.Combine(path, "NuGet.Config"), "<configuration><packageSources><clear /></packageSources></configuration>");
+    return path;
+}
 static void Assert(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }

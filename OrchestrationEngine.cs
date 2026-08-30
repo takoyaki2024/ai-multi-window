@@ -38,6 +38,10 @@ public sealed class OrchestrationEngine
     public bool AwaitingResponse { get; set; }
     public AgentRole AwaitingRole { get; set; } = AgentRole.Manager;
     public int AwaitingCoderStepIndex { get; set; }
+    public string PreviousFailedCoderAttempt { get; set; } = string.Empty;
+    public string PreviousPatchSearchHash { get; set; } = string.Empty;
+    public string RetryStrategy { get; set; } = string.Empty;
+    public int CoderRepairAttempt { get; set; }
 
     [JsonIgnore]
     public int CoderStepNumber => ImplementationSteps.Count == 0 ? 1 : Math.Min(CoderStepIndex + 1, ImplementationSteps.Count);
@@ -71,6 +75,7 @@ public sealed class OrchestrationEngine
         WorkspaceContext = workspaceContext; CoderWorkspaceContext = string.Empty;
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
         AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
+        PreviousFailedCoderAttempt = string.Empty; PreviousPatchSearchHash = string.Empty; RetryStrategy = string.Empty; CoderRepairAttempt = 0;
         Save();
         WorkflowDiagnostics.Event("1 Manager", "workflow", "WORKFLOW_STARTED", $"taskLength={TaskText.Length}; workspaceContextLength={WorkspaceContext.Length}");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_STARTED");
@@ -84,6 +89,7 @@ public sealed class OrchestrationEngine
         WorkspaceContext = string.Empty; CoderWorkspaceContext = string.Empty;
         ImplementationSteps.Clear(); CoderStepIndex = 0; CoderStepAnswers.Clear(); SuccessfulExecutionResults.Clear();
         AwaitingResponse = false; AwaitingRole = AgentRole.Manager; AwaitingCoderStepIndex = 0;
+        PreviousFailedCoderAttempt = string.Empty; PreviousPatchSearchHash = string.Empty; RetryStrategy = string.Empty; CoderRepairAttempt = 0;
         Save();
         WorkflowDiagnostics.Event("System", "workflow", "WORKFLOW_RESET");
         WorkflowDiagnostics.Snapshot(this, "WORKFLOW_RESET");
@@ -164,9 +170,19 @@ public sealed class OrchestrationEngine
 
         var answerIdentity = $"{roleBefore}:{CoderStepIndex}:{normalized}";
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(answerIdentity)));
+        var duplicateFailedCoderRepair = roleBefore == AgentRole.Coder
+            && !LastExecutionSucceeded
+            && hash == LastAnswerHash;
         DuplicateCount = hash == LastAnswerHash ? DuplicateCount + 1 : 0;
         LastAnswerHash = hash;
-        if (DuplicateCount >= DuplicateLimit)
+        if (duplicateFailedCoderRepair)
+        {
+            RetryStrategy = "ESCALATE_TO_MODIFY_IF_COMPLETE_FILE";
+            WorkflowDiagnostics.Event("3 Coder", "repair", "CODER_DUPLICATE_REPAIR_ESCALATION",
+                $"duplicateCount={DuplicateCount}; nextRepairAttempt={FixAttempts + 1}/{MaxFixAttempts}; previousPatchSearchHash={PreviousPatchSearchHash}; retryStrategy={RetryStrategy}");
+            WorkflowDiagnostics.Snapshot(this, "CODER_DUPLICATE_REPAIR_ESCALATION", "同じ失敗回答を停止理由にせず、次のrepair戦略へ昇格します。");
+        }
+        else if (DuplicateCount >= DuplicateLimit)
         {
             WorkflowDiagnostics.Event(RoleLabel(roleBefore), "answer", "DUPLICATE_ANSWER_BLOCKED", $"duplicateCount={DuplicateCount}");
             WorkflowDiagnostics.Snapshot(this, "DUPLICATE_ANSWER_BLOCKED");
@@ -193,7 +209,15 @@ public sealed class OrchestrationEngine
                 if (!LastExecutionSucceeded)
                 {
                     FixAttempts++;
+                    CoderRepairAttempt = FixAttempts;
+                    PreviousFailedCoderAttempt = normalized;
+                    PreviousPatchSearchHash = BuildPatchSearchHash(normalized);
+                    if (IsNoSafeMatchFailure(ExecutionResult) && string.IsNullOrWhiteSpace(RetryStrategy))
+                        RetryStrategy = "RELOAD_COMPLETE_FILE_THEN_SHORT_UNIQUE_SEARCH";
                     WorkflowDiagnostics.Event("3 Coder", "transition", "CODER_RETRY_LOCAL_VERIFICATION_FAILED", $"fixAttempt={FixAttempts}/{MaxFixAttempts}; coderStep={CoderStepNumber}/{CoderStepCount}");
+                    if (IsNoSafeMatchFailure(ExecutionResult))
+                        WorkflowDiagnostics.Event("3 Coder", "repair", "NO_SAFE_MATCH_REPAIR",
+                            $"PREVIOUS_PATCH_SEARCH_HASH={PreviousPatchSearchHash}; RETRY_STRATEGY={RetryStrategy}; CODER_REPAIR_ATTEMPT={CoderRepairAttempt}");
                     WorkflowDiagnostics.Snapshot(this, "CODER_RETRY_LOCAL_VERIFICATION_FAILED", Tail(ExecutionResult, 3500));
                     if (FixAttempts >= MaxFixAttempts)
                     {
@@ -204,6 +228,10 @@ public sealed class OrchestrationEngine
                 }
                 else
                 {
+                    PreviousFailedCoderAttempt = string.Empty;
+                    PreviousPatchSearchHash = string.Empty;
+                    RetryStrategy = string.Empty;
+                    CoderRepairAttempt = 0;
                     while (CoderStepAnswers.Count <= CoderStepIndex) CoderStepAnswers.Add(string.Empty);
                     CoderStepAnswers[CoderStepIndex] = normalized;
                     if (CoderStepIndex + 1 < CoderStepCount)
@@ -317,6 +345,13 @@ public sealed class OrchestrationEngine
             SEARCHは推測せず実際のコンテキストからそのまま使ってください。Markdownコードフェンスや説明文をブロック内へ混ぜないでください。
             XAML/XMLの終了ルートタグより後ろへ内容を混ぜないでください。
             LOCAL_EXECUTION_FEEDBACKに失敗がある場合は最優先で修正してください。
+            PREVIOUS_FAILED_CODER_ATTEMPTがある場合は、前回失敗した出力です。同じ失敗内容をそのまま再生成してはいけません。
+            LOCAL_EXECUTION_FEEDBACKに PATCH_MATCH_MODE: NO_SAFE_MATCH または matches=0 がある場合、次を厳守してください。
+            A. 最新のCOMPLETE FILEを再読込する。
+            B. その最新内容から1〜3行程度の短い一意なSEARCHを整形せず完全コピーする。
+            C. PREVIOUS_FAILED_CODER_ATTEMPT内と同じSEARCH文字列は絶対に再利用しない。
+            D. PATCHで安全に表現できない場合、対象のCOMPLETE FILEが本当に先頭から末尾まで提供されている場合のみMODIFYへ切り替える。
+            RETRY_STRATEGYが ESCALATE_TO_MODIFY_IF_COMPLETE_FILE の場合は、短い別SEARCHへ変更するか、完全なファイル全体が提供済みならMODIFYへ昇格してください。
             このステップだけを完了させ、最後に独立行で CODER_DONE と書いてください。
 
             USER_REQUEST:
@@ -330,6 +365,18 @@ public sealed class OrchestrationEngine
 
             LOCAL_EXECUTION_FEEDBACK:
             {ExecutionResult}
+
+            PREVIOUS_FAILED_CODER_ATTEMPT:
+            {(string.IsNullOrWhiteSpace(PreviousFailedCoderAttempt) ? "(なし)" : PreviousFailedCoderAttempt)}
+
+            PREVIOUS_PATCH_SEARCH_HASH:
+            {(string.IsNullOrWhiteSpace(PreviousPatchSearchHash) ? "(なし)" : PreviousPatchSearchHash)}
+
+            RETRY_STRATEGY:
+            {(string.IsNullOrWhiteSpace(RetryStrategy) ? "INITIAL_PATCH" : RetryStrategy)}
+
+            CODER_REPAIR_ATTEMPT:
+            {CoderRepairAttempt}/{MaxFixAttempts}
 
             WORKSPACE_CONTEXT:
             {CoderWorkspaceContext}
@@ -430,6 +477,19 @@ public sealed class OrchestrationEngine
     private static bool ContainsMarker(string answer, string marker) =>
         answer.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Any(line => string.Equals(line.Trim(), marker, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsNoSafeMatchFailure(string value) =>
+        value.Contains("PATCH_MATCH_MODE: NO_SAFE_MATCH", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("matches=0", StringComparison.OrdinalIgnoreCase)
+        || value.Contains("matches = 0", StringComparison.OrdinalIgnoreCase);
+
+    private static string BuildPatchSearchHash(string answer)
+    {
+        var matches = Regex.Matches(answer, @"(?ms)^<<<SEARCH\s*\r?\n(?<search>.*?)\r?\nSEARCH\s*$", RegexOptions.CultureInvariant);
+        if (matches.Count == 0) return string.Empty;
+        var searches = string.Join("\n---\n", matches.Select(match => match.Groups["search"].Value));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(searches)));
+    }
 
     private static ReviewVerdict ReviewerVerdict(string answer)
     {
