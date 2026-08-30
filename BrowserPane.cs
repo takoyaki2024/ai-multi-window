@@ -56,10 +56,7 @@ public sealed class BrowserPane : Grid
         toolbar.Children.Add(_addressBar);
         Children.Add(toolbar);
 
-        var aiBar = new Grid
-        {
-            Margin = new Thickness(6, 0, 6, 6)
-        };
+        var aiBar = new Grid { Margin = new Thickness(6, 0, 6, 6) };
         aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         aiBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -186,13 +183,7 @@ public sealed class BrowserPane : Grid
     }
 
     public void NavigateHome() => Navigate(_homeUrl);
-
-    public void FocusAddressBar()
-    {
-        _addressBar.Focus();
-        _addressBar.SelectAll();
-    }
-
+    public void FocusAddressBar() { _addressBar.Focus(); _addressBar.SelectAll(); }
     public void FocusPromptBox() => _promptBox.Focus();
 
     public async Task<bool> SendMessageAsync(string message)
@@ -211,7 +202,6 @@ public sealed class BrowserPane : Grid
                     '[contenteditable="true"][role="textbox"]',
                     '[contenteditable="true"]'
                 ];
-
                 let input = null;
                 for (const selector of selectors) {
                     const candidates = Array.from(document.querySelectorAll(selector));
@@ -221,30 +211,20 @@ public sealed class BrowserPane : Grid
                     });
                     if (input) break;
                 }
-
                 if (!input) return 'ERROR:NO_INPUT';
                 input.focus();
-
                 if (input instanceof HTMLTextAreaElement || input instanceof HTMLInputElement) {
-                    const proto = input instanceof HTMLTextAreaElement
-                        ? HTMLTextAreaElement.prototype
-                        : HTMLInputElement.prototype;
+                    const proto = input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
                     const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-                    if (setter) setter.call(input, message);
-                    else input.value = message;
+                    if (setter) setter.call(input, message); else input.value = message;
                     input.dispatchEvent(new Event('input', { bubbles: true }));
                     input.dispatchEvent(new Event('change', { bubbles: true }));
                 } else {
                     input.textContent = '';
                     document.execCommand('insertText', false, message);
                     if (!input.textContent) input.textContent = message;
-                    input.dispatchEvent(new InputEvent('input', {
-                        bubbles: true,
-                        inputType: 'insertText',
-                        data: message
-                    }));
+                    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: message }));
                 }
-
                 const sendSelectors = [
                     'button[data-testid="send-button"]',
                     'button[aria-label*="Send"]',
@@ -252,30 +232,19 @@ public sealed class BrowserPane : Grid
                     'button[title*="Send"]',
                     'button[title*="送信"]'
                 ];
-
                 for (const selector of sendSelectors) {
-                    const button = Array.from(document.querySelectorAll(selector)).find(btn =>
-                        !btn.disabled && btn.getBoundingClientRect().width > 0
-                    );
-                    if (button) {
-                        button.click();
-                        return 'OK:BUTTON';
-                    }
+                    const button = Array.from(document.querySelectorAll(selector)).find(btn => !btn.disabled && btn.getBoundingClientRect().width > 0);
+                    if (button) { button.click(); return 'OK:BUTTON'; }
                 }
-
-                input.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-                }));
-                input.dispatchEvent(new KeyboardEvent('keyup', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true
-                }));
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
+                input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
                 return 'OK:ENTER';
             })();
             """;
 
         try
         {
-            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script);
+            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(8));
             var result = JsonSerializer.Deserialize<string>(raw) ?? string.Empty;
             return result.StartsWith("OK:", StringComparison.Ordinal);
         }
@@ -292,29 +261,43 @@ public sealed class BrowserPane : Grid
 
         const string script = """
             (() => {
-                const selectors = [
+                const directSelectors = [
                     '[data-message-author-role="assistant"]',
                     '[data-content-source="assistant"]',
-                    'main article'
+                    '[data-turn="assistant"]',
+                    'article[data-testid*="conversation-turn"]'
                 ];
 
-                for (const selector of selectors) {
+                for (const selector of directSelectors) {
                     const items = Array.from(document.querySelectorAll(selector))
                         .filter(el => el.innerText && el.innerText.trim().length > 0);
                     if (items.length > 0) return items[items.length - 1].innerText.trim();
                 }
+
+                const articles = Array.from(document.querySelectorAll('main article'))
+                    .filter(el => el.innerText && el.innerText.trim().length > 0);
+                if (articles.length > 0) return articles[articles.length - 1].innerText.trim();
+
                 return '';
             })();
             """;
 
         try
         {
-            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script);
+            _aiStatus.Text = "取得中";
+            var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script).WaitAsync(TimeSpan.FromSeconds(5));
             var text = JsonSerializer.Deserialize<string>(raw);
+            _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (TimeoutException)
+        {
+            _aiStatus.Text = "取得タイムアウト";
+            return null;
         }
         catch
         {
+            _aiStatus.Text = "取得失敗";
             return null;
         }
     }
@@ -322,41 +305,20 @@ public sealed class BrowserPane : Grid
     private async Task SendPromptAsync()
     {
         var message = _promptBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            _aiStatus.Text = "未入力";
-            return;
-        }
-
+        if (string.IsNullOrWhiteSpace(message)) { _aiStatus.Text = "未入力"; return; }
         SetAiControlsEnabled(false);
         _aiStatus.Text = "送信中";
         var success = await SendMessageAsync(message);
-        if (success)
-        {
-            _promptBox.Clear();
-            _aiStatus.Text = "送信済";
-        }
-        else
-        {
-            _aiStatus.Text = "送信失敗";
-        }
+        if (success) { _promptBox.Clear(); _aiStatus.Text = "送信済"; }
+        else _aiStatus.Text = "送信失敗";
         SetAiControlsEnabled(true);
     }
 
     private async Task CopyLatestAnswerAsync()
     {
         SetAiControlsEnabled(false);
-        _aiStatus.Text = "取得中";
         var answer = await GetLatestAnswerAsync();
-        if (!string.IsNullOrWhiteSpace(answer))
-        {
-            Clipboard.SetText(answer);
-            _aiStatus.Text = "コピー済";
-        }
-        else
-        {
-            _aiStatus.Text = "回答なし";
-        }
+        if (!string.IsNullOrWhiteSpace(answer)) Clipboard.SetText(answer);
         SetAiControlsEnabled(true);
     }
 
@@ -400,12 +362,8 @@ public sealed class BrowserPane : Grid
     public static string NormalizeUrl(string? value)
     {
         var text = (value ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(text))
-            return "https://www.google.com/";
-
-        if (!text.Contains("://", StringComparison.Ordinal))
-            text = "https://" + text;
-
+        if (string.IsNullOrWhiteSpace(text)) return "https://www.google.com/";
+        if (!text.Contains("://", StringComparison.Ordinal)) text = "https://" + text;
         return Uri.TryCreate(text, UriKind.Absolute, out var uri) &&
                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
             ? uri.ToString()
