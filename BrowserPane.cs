@@ -1,5 +1,6 @@
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -19,6 +20,10 @@ public sealed class BrowserPane : Grid
     private readonly TextBlock _aiStatus;
     private readonly string _profileFolder;
     private string _homeUrl;
+    private string? _fallbackWorkflowAnswer;
+
+    public bool HasPendingWorkflowResponse =>
+        !string.IsNullOrWhiteSpace(_fallbackWorkflowAnswer) || _chatAdapter?.HasPendingResponse == true;
 
     public event Action<string>? UrlChanged;
 
@@ -217,11 +222,39 @@ public sealed class BrowserPane : Grid
     public async Task<bool> SendMessageAsync(string message, CancellationToken cancellationToken = default)
     {
         if (_chatAdapter is null || string.IsNullOrWhiteSpace(message)) return false;
+
+        var beforeAnswer = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
+        _fallbackWorkflowAnswer = null;
         _aiStatus.Text = "送信中";
+
         var result = await _chatAdapter.SendAsync(message, cancellationToken);
-        _aiStatus.Text = result.Success ? "送信済" : $"送信失敗: {result.Code}";
+        if (result.Success)
+        {
+            _aiStatus.Text = "送信済";
+            _aiStatus.ToolTip = result.Detail;
+            return true;
+        }
+
+        // ChatGPT側のDOM差分で送信後のuser-turn検出だけ失敗するケースがある。
+        // 送信前に存在しなかった新しいassistant回答が実際に出現した場合のみ、
+        // その回答を今回のworkflow回答として保持して安全に継続する。
+        for (var i = 0; i < 20; i++)
+        {
+            await Task.Delay(500, cancellationToken);
+            var afterAnswer = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(afterAnswer) &&
+                !string.Equals(afterAnswer, beforeAnswer, StringComparison.Ordinal))
+            {
+                _fallbackWorkflowAnswer = afterAnswer;
+                _aiStatus.Text = "送信済(回答検出)";
+                _aiStatus.ToolTip = $"{result.Code}: {result.Detail}";
+                return true;
+            }
+        }
+
+        _aiStatus.Text = $"送信失敗: {result.Code}";
         _aiStatus.ToolTip = result.Detail;
-        return result.Success;
+        return false;
     }
 
     public async Task<string?> GetLatestAnswerAsync(CancellationToken cancellationToken = default)
@@ -230,6 +263,14 @@ public sealed class BrowserPane : Grid
         {
             _aiStatus.Text = "取得失敗: WebView未準備";
             return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_fallbackWorkflowAnswer))
+        {
+            var fallback = _fallbackWorkflowAnswer;
+            _fallbackWorkflowAnswer = null;
+            _aiStatus.Text = "取得済(回答検出)";
+            return fallback;
         }
 
         try
@@ -241,7 +282,7 @@ public sealed class BrowserPane : Grid
         }
         catch (TimeoutException)
         {
-            _aiStatus.Text = "取得タイムアウト";
+            _aiStatus.Text = "取得タイムアウト(送信は保持)";
             return null;
         }
         catch (Exception ex)
@@ -262,7 +303,7 @@ public sealed class BrowserPane : Grid
         try
         {
             _aiStatus.Text = "最新回答取得中";
-            var text = await _chatAdapter.GetVisibleLatestAnswerAsync(cancellationToken);
+            var text = await GetVisibleLatestAnswerRobustAsync(cancellationToken);
             _aiStatus.Text = string.IsNullOrWhiteSpace(text) ? "回答なし" : "取得済";
             return string.IsNullOrWhiteSpace(text) ? null : text;
         }
@@ -270,6 +311,56 @@ public sealed class BrowserPane : Grid
         {
             SetExceptionStatus("取得失敗", ex);
             return null;
+        }
+    }
+
+    private async Task<string?> GetVisibleLatestAnswerRobustAsync(CancellationToken cancellationToken)
+    {
+        if (_chatAdapter is null) return null;
+
+        var adapterText = await _chatAdapter.GetVisibleLatestAnswerAsync(cancellationToken);
+        if (!string.IsNullOrWhiteSpace(adapterText)) return adapterText;
+
+        if (_webView.CoreWebView2 is null) return null;
+
+        const string script = """
+            (() => {
+              const visible = e => {
+                if (!e) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && getComputedStyle(e).visibility !== 'hidden';
+              };
+              const selectors = [
+                '[data-message-author-role="assistant"]',
+                '[data-content-source="assistant"]',
+                '[data-turn="assistant"]',
+                'main article[data-testid*="conversation-turn"] .markdown',
+                'main article .markdown',
+                'main .markdown',
+                'main [class*="markdown"]'
+              ];
+              const texts = [];
+              for (const selector of selectors) {
+                for (const el of document.querySelectorAll(selector)) {
+                  if (!visible(el)) continue;
+                  const text = (el.innerText || el.textContent || '').trim();
+                  if (text.length > 0) texts.push(text);
+                }
+              }
+              return texts.length ? texts[texts.length - 1] : '';
+            })()
+            """;
+
+        var raw = await _webView.CoreWebView2.ExecuteScriptAsync(script)
+            .WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+        if (string.IsNullOrWhiteSpace(raw) || raw is "null" or "undefined") return null;
+        try
+        {
+            return JsonSerializer.Deserialize<string>(raw);
+        }
+        catch (JsonException)
+        {
+            return raw.Trim('"');
         }
     }
 

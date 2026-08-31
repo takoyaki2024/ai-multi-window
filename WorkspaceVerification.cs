@@ -22,34 +22,49 @@ public sealed class DotNetVerificationProvider : IWorkspaceVerificationProvider
     public async Task<VerificationResult> VerifyAsync(string root, IReadOnlyList<string> changedPaths, CancellationToken cancellationToken)
     {
         var output = new StringBuilder();
-        var build = await RunDotNetAsync(root, ["build", "--nologo"], cancellationToken);
-        output.AppendLine("BUILD:").AppendLine($"EXIT: {build.ExitCode}").AppendLine(build.Output);
-        if (build.ExitCode != 0) return new(false, output.ToString().Trim());
+        var artifactsPath = Path.Combine(Path.GetTempPath(), "AiMultiWindowVerify", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(artifactsPath);
 
-        var testProjects = Directory.EnumerateFiles(root, "*.*proj", SearchOption.AllDirectories)
-            .Where(p => !IsGenerated(p) && IsTestProject(p)).ToList();
-        if (testProjects.Count == 0)
+        try
         {
-            output.AppendLine("TEST:").AppendLine("SKIPPED: no test project detected");
-        }
-        else
-        {
-            foreach (var project in testProjects)
+            // Self-modification can target the currently running AiMultiWindow binaries.
+            // Build into an isolated artifacts directory so verification never replaces/locks
+            // the executable or assemblies that are hosting this workflow.
+            var build = await RunDotNetAsync(root, ["build", "--nologo", "--artifacts-path", artifactsPath], cancellationToken);
+            output.AppendLine("BUILD:").AppendLine($"EXIT: {build.ExitCode}").AppendLine(build.Output);
+            if (build.ExitCode != 0) return new(false, output.ToString().Trim());
+
+            var testProjects = Directory.EnumerateFiles(root, "*.*proj", SearchOption.AllDirectories)
+                .Where(p => !IsGenerated(p) && IsTestProject(p)).ToList();
+            if (testProjects.Count == 0)
             {
-                var test = await RunDotNetAsync(root, ["test", project, "--no-build", "--nologo"], cancellationToken);
-                output.AppendLine("TEST:").AppendLine($"PROJECT: {Path.GetRelativePath(root, project)}")
-                    .AppendLine($"EXIT: {test.ExitCode}").AppendLine(test.Output);
-                if (test.ExitCode != 0) return new(false, output.ToString().Trim());
+                output.AppendLine("TEST:").AppendLine("SKIPPED: no test project detected");
             }
-        }
+            else
+            {
+                foreach (var project in testProjects)
+                {
+                    var testArtifacts = Path.Combine(artifactsPath, "tests", Path.GetFileNameWithoutExtension(project));
+                    var test = await RunDotNetAsync(root, ["test", project, "--nologo", "--artifacts-path", testArtifacts], cancellationToken);
+                    output.AppendLine("TEST:").AppendLine($"PROJECT: {Path.GetRelativePath(root, project)}")
+                        .AppendLine($"EXIT: {test.ExitCode}").AppendLine(test.Output);
+                    if (test.ExitCode != 0) return new(false, output.ToString().Trim());
+                }
+            }
 
-        var diff = await RunProcessAsync(root, "git", ["diff", "--no-ext-diff", "--", .. changedPaths], cancellationToken, TimeSpan.FromSeconds(30));
-        output.AppendLine("GIT_DIFF:").AppendLine(diff.ExitCode == 0 ? diff.Output : $"UNAVAILABLE: {diff.Output}");
-        return new(true, output.ToString().Trim());
+            var diff = await RunProcessAsync(root, "git", ["diff", "--no-ext-diff", "--", .. changedPaths], cancellationToken, TimeSpan.FromSeconds(30));
+            output.AppendLine("GIT_DIFF:").AppendLine(diff.ExitCode == 0 ? diff.Output : $"UNAVAILABLE: {diff.Output}");
+            return new(true, output.ToString().Trim());
+        }
+        finally
+        {
+            try { if (Directory.Exists(artifactsPath)) Directory.Delete(artifactsPath, true); } catch { }
+        }
     }
 
     private static bool IsGenerated(string path) => path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
-        || path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
+        || path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+        || path.Contains($"{Path.DirectorySeparatorChar}.ai-multi-window{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsTestProject(string path)
     {

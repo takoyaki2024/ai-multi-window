@@ -4,11 +4,11 @@ namespace AiMultiWindow;
 
 public static class WorkspaceContextBuilder
 {
-    private const int MaxContextChars = 32_000;
+    private const int MaxContextChars = 14_000;
     private const int MaxSingleFileChars = 18_000;
     private const int MaxFiles = 40;
-    private const int MaxCoderFiles = 12;
-    private const int MaxCoderContextChars = 120_000;
+    private const int MaxCoderFiles = 2;
+    private const int MaxCoderContextChars = 40_000;
     private const int MaxCoderSingleFileChars = 80_000;
 
     private static readonly HashSet<string> TextExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -59,8 +59,6 @@ public static class WorkspaceContextBuilder
             }
 
             var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-            // Planner receives small project/configuration files and a tree. Large source files are
-            // deliberately omitted instead of truncated so no partial file can be mistaken for a full file.
             if (content.Length > MaxSingleFileChars)
             {
                 output.AppendLine($"OMITTED_LARGE_FILE: {relative} ({content.Length} chars)");
@@ -72,7 +70,7 @@ public static class WorkspaceContextBuilder
             if (block.Length > remaining)
             {
                 output.AppendLine($"OMITTED_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial.");
-                break;
+                continue;
             }
 
             output.Append(block);
@@ -87,22 +85,37 @@ public static class WorkspaceContextBuilder
     {
         if (string.IsNullOrWhiteSpace(workspaceRoot) || !Directory.Exists(workspaceRoot))
             return "WORKSPACE_CONTEXT_ERROR: Workspaceが存在しません。";
+
         var root = Path.GetFullPath(workspaceRoot);
         var all = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Where(path => !IsIgnored(root, path))
             .Select(path => new FileInfo(path))
             .Where(info => TextExtensions.Contains(info.Extension))
             .ToList();
-        var mentioned = all.Where(f => plannerAnswer.Contains(Path.GetRelativePath(root, f.FullName).Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
-                                      || plannerAnswer.Contains(f.Name, StringComparison.OrdinalIgnoreCase));
-        var selected = mentioned.Concat(all.Where(f => f.Extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)))
-            .DistinctBy(f => f.FullName, StringComparer.OrdinalIgnoreCase).OrderBy(f => Priority(root, f)).Take(MaxCoderFiles).ToList();
-        var output = new StringBuilder("CODER_WORKSPACE_FILES (complete files only):\n");
-        foreach (var file in selected)
+
+        var mentioned = all
+            .Where(f => PlannerMentionsFile(root, f, plannerAnswer))
+            .OrderBy(f => CoderPriority(root, f))
+            .ThenBy(f => Path.GetRelativePath(root, f.FullName), StringComparer.OrdinalIgnoreCase)
+            .Take(MaxCoderFiles)
+            .ToList();
+
+        if (mentioned.Count == 0)
+        {
+            mentioned = all
+                .OrderBy(f => CoderPriority(root, f))
+                .ThenBy(f => Path.GetRelativePath(root, f.FullName), StringComparer.OrdinalIgnoreCase)
+                .Take(1)
+                .ToList();
+        }
+
+        var output = new StringBuilder("CODER_WORKSPACE_FILES (complete selected files only):\n");
+        foreach (var file in mentioned)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var content = await File.ReadAllTextAsync(file.FullName, Encoding.UTF8, cancellationToken);
             var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
+
             if (content.Length > MaxCoderSingleFileChars)
             {
                 output.AppendLine($"OMITTED_TOO_LARGE: {relative} ({content.Length} chars). File exceeds coder safety limit; do not modify without full content.");
@@ -112,14 +125,46 @@ public static class WorkspaceContextBuilder
             var block = $"\n===== COMPLETE FILE: {relative} =====\n{content}\n===== END COMPLETE FILE =====\n";
             if (output.Length + block.Length > MaxCoderContextChars)
             {
-                output.AppendLine($"OMITTED_CODER_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial.");
+                output.AppendLine($"OMITTED_CODER_CONTEXT_BUDGET: {relative} ({content.Length} chars). Content is not partial. Do not modify this omitted file.");
                 continue;
             }
 
             output.Append(block);
         }
+
         output.AppendLine($"CODER_CONTEXT_CHARS: {output.Length}");
         return output.ToString();
+    }
+
+    public static IReadOnlySet<string> GetCompleteFilePaths(string coderContext)
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(coderContext)) return paths;
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                     coderContext,
+                     @"(?m)^===== COMPLETE FILE: (?<path>[^\r\n]+) =====\r?$"))
+        {
+            paths.Add(match.Groups["path"].Value.Trim().Replace('\\', '/'));
+        }
+        return paths;
+    }
+
+    private static bool PlannerMentionsFile(string root, FileInfo file, string plannerAnswer)
+    {
+        var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
+        return plannerAnswer.Contains(relative, StringComparison.OrdinalIgnoreCase)
+            || plannerAnswer.Contains(file.Name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int CoderPriority(string root, FileInfo info)
+    {
+        var relative = Path.GetRelativePath(root, info.FullName).Replace('\\', '/');
+        if (relative.Equals("MainWindow.xaml", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (relative.Equals("MainWindow.xaml.cs", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (info.Extension.Equals(".xaml", StringComparison.OrdinalIgnoreCase)) return 2;
+        if (info.Extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)) return 3;
+        if (info.Extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)) return 4;
+        return 5;
     }
 
     private static bool IsIgnored(string root, string path)

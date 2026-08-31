@@ -15,6 +15,7 @@ public sealed class ChatGptWebAdapter
     private string? _lastLogPath;
 
     public string? LastLogPath => _lastLogPath;
+    public bool HasPendingResponse => _pendingResponse is not null;
 
     public ChatGptWebAdapter(CoreWebView2 core) => _core = core;
 
@@ -25,6 +26,9 @@ public sealed class ChatGptWebAdapter
         var log = new StringBuilder();
         try
         {
+            if (_pendingResponse is not null)
+                return await FailAsync(log, "PENDING_RESPONSE", "The previously accepted send must be collected before another message can be sent.");
+
             Log(log, "SEND_START", $"expectedLength={message.Length}; normalizedExpectedLength={Normalize(message).Length}");
             var initial = await ReadStateAsync(cancellationToken);
             LogState(log, "INITIAL", initial);
@@ -45,13 +49,14 @@ public sealed class ChatGptWebAdapter
             LogState(log, "AFTER_CLEAR", cleared);
 
             await InsertTextAsync(message, log, cancellationToken);
+            await EnsureComposerVisibleAsync(cancellationToken);
 
             ComposerState? ready = null;
             for (var i = 0; i < 30; i++)
             {
                 await Task.Delay(100, cancellationToken);
                 ready = await ReadStateAsync(cancellationToken);
-                if (TextEquals(ready.ComposerText, message) && ready.SendButtonEnabled && ready.SendX is not null && ready.SendY is not null)
+                if (TextEquals(ready.ComposerText, message) && ready.SendButtonEnabled && ready.SendX is not null && ready.SendY is not null && ready.SendHitTestMatches)
                     break;
             }
 
@@ -74,18 +79,22 @@ public sealed class ChatGptWebAdapter
             await DispatchMouseAsync("mousePressed", ready.SendX.Value, ready.SendY.Value, cancellationToken);
             await DispatchMouseAsync("mouseReleased", ready.SendX.Value, ready.SendY.Value, cancellationToken);
 
-            var accepted = await WaitForAcceptanceAsync(initial, message, log, cancellationToken);
-            if (!accepted.Success)
-            {
-                await FlushLogAsync(log);
-                return accepted;
-            }
-
+            // Once the single physical click has been dispatched, treat this turn as in-flight.
+            // Losing a transient DOM user-turn signal must never make the caller click Send again.
             _pendingResponse = new ResponseBaseline(
                 initial.AssistantCount,
                 initial.UserCount,
                 initial.LatestAssistantText,
                 message);
+
+            var accepted = await WaitForAcceptanceAsync(initial, message, log, cancellationToken);
+            if (!accepted.Success)
+            {
+                Log(log, "SEND_TRIGGERED_UNCONFIRMED", $"{accepted.Code}: response wait will continue from the preserved baseline");
+                await FlushLogAsync(log);
+                return new(true, "TRIGGERED_UNCONFIRMED", BuildDetail("The single send click was dispatched; acceptance DOM signals were inconclusive, so the response remains pending without resending."));
+            }
+
             Log(log, "SEND_ACCEPTED", "new user turn and assistant generation observed");
             await FlushLogAsync(log);
             return new(true, "ACCEPTED", BuildDetail("A new user turn and assistant generation were observed."));
@@ -102,7 +111,9 @@ public sealed class ChatGptWebAdapter
 
     private async Task InsertTextAsync(string message, StringBuilder log, CancellationToken cancellationToken)
     {
-        var timeoutSeconds = Math.Clamp(9 + (message.Length / 1000), 10, 60);
+        var timeoutSeconds = message.Length >= 20_000
+            ? 120
+            : Math.Clamp(9 + (message.Length / 1000), 10, 60);
         Log(log, "CDP_INSERT_TEXT_START", $"length={message.Length}; mode=single; timeoutSeconds={timeoutSeconds}");
         await CallCdpAsync(
             "Input.insertText",
@@ -110,6 +121,25 @@ public sealed class ChatGptWebAdapter
             cancellationToken,
             TimeSpan.FromSeconds(timeoutSeconds));
         Log(log, "CDP_INSERT_TEXT", "completed; mode=single");
+    }
+
+    private async Task EnsureComposerVisibleAsync(CancellationToken cancellationToken)
+    {
+        const string script = """
+            (() => {
+              const composer = document.querySelector('#prompt-textarea')
+                || document.querySelector('[contenteditable="true"][role="textbox"]')
+                || document.querySelector('div[contenteditable="true"]')
+                || document.querySelector('textarea');
+              if (!composer) return false;
+              const form = composer.closest('form') || composer.parentElement;
+              (form || composer).scrollIntoView({ block: 'end', inline: 'nearest' });
+              composer.focus();
+              return true;
+            })()
+            """;
+        await ExecuteJsonAsync<bool>(script, cancellationToken);
+        await Task.Delay(100, cancellationToken);
     }
 
     public async Task<string?> WaitForLatestResponseAsync(CancellationToken cancellationToken = default)
@@ -142,7 +172,12 @@ public sealed class ChatGptWebAdapter
                 var assistantAdvanced = last.AssistantCount > baseline.AssistantCount || assistantChanged;
                 var hasResponseText = !string.IsNullOrWhiteSpace(last.LatestAssistantText);
 
-                if (newUserTurnObserved && assistantAdvanced && hasResponseText)
+                // SendAsync already verified acceptance before creating _pendingResponse.
+                // ChatGPT's current DOM can stop exposing the matching user turn even while the
+                // assistant response is complete, so response completion must not depend on the
+                // user-turn counter advancing a second time. A changed/new assistant response that
+                // is no longer generating and remains stable is enough to advance safely.
+                if (assistantAdvanced && hasResponseText)
                 {
                     if (!last.Generating && string.Equals(stableText, last.LatestAssistantText, StringComparison.Ordinal))
                         stableReads++;
@@ -154,7 +189,7 @@ public sealed class ChatGptWebAdapter
                     {
                         LogState(log, "RESPONSE_READY", last);
                         Log(log, "RESPONSE_ACCEPTED",
-                            $"newUserTurn=True; displayedBodyMatches={displayedBodyMatches}; assistantCountAdvanced={last.AssistantCount > baseline.AssistantCount}; assistantTextChanged={assistantChanged}; responseLength={stableText.Length}");
+                            $"newUserTurnObserved={newUserTurnObserved}; displayedBodyMatches={displayedBodyMatches}; assistantCountAdvanced={last.AssistantCount > baseline.AssistantCount}; assistantTextChanged={assistantChanged}; responseLength={stableText.Length}");
                         _pendingResponse = null;
                         await FlushLogAsync(log);
                         return stableText;
@@ -172,7 +207,7 @@ public sealed class ChatGptWebAdapter
 
             if (last is not null)
                 LogState(log, "RESPONSE_TIMEOUT_STATE", last);
-            Log(log, "RESPONSE_TIMEOUT", "No stable response tied to the accepted user turn was observed within two minutes.");
+            Log(log, "RESPONSE_TIMEOUT", "No stable assistant response tied to the accepted send was observed within two minutes.");
             await FlushLogAsync(log);
             throw new TimeoutException("The matching ChatGPT response did not finish within two minutes.");
         }
@@ -200,7 +235,9 @@ public sealed class ChatGptWebAdapter
             last = await ReadStateAsync(cancellationToken);
             var bodyMatches = TransportTextEquals(last.LatestUserText, message);
             userObserved |= last.UserCount > baseline.UserCount;
-            if (userObserved && (last.Generating || last.AssistantCount > baseline.AssistantCount))
+            var assistantChanged = !TextEquals(last.LatestAssistantText, baseline.LatestAssistantText);
+            var assistantActivity = last.Generating || last.AssistantCount > baseline.AssistantCount || assistantChanged;
+            if (assistantActivity && (userObserved || last.AssistantCount > baseline.AssistantCount || assistantChanged))
             {
                 LogState(log, "ACCEPTED_STATE", last);
                 Log(log, "ACCEPTED_COMPARE",

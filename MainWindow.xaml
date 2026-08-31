@@ -4,108 +4,84 @@
         Title="AI Multi Window"
         Width="1600"
         Height="920"
-        MinWidth="1000"
+        MinWidth="1100"
         MinHeight="650"
         WindowStartupLocation="CenterScreen"
         KeyDown="Window_KeyDown">
-    <DockPanel>
-        <Border DockPanel.Dock="Top" Background="#F3F4F6" BorderBrush="#D1D5DB" BorderThickness="0,0,0,1">
-            <Grid Margin="10,8">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
+    <DockPanel Background="#111827">
+        <Border DockPanel.Dock="Top"
+                Background="#F3F4F6"
+                BorderBrush="#D1D5DB"
+                BorderThickness="0,0,0,1"
+                Padding="8,6">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
 
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="分割" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <Button x:Name="Layout1Button" Content="1" Width="38" Height="32" Margin="0,0,5,0" Click="LayoutButton_Click" Tag="1" ToolTip="1画面 (Ctrl+1)"/>
-                    <Button x:Name="Layout2Button" Content="2" Width="38" Height="32" Margin="0,0,5,0" Click="LayoutButton_Click" Tag="2" ToolTip="左右2分割 (Ctrl+2)"/>
-                    <Button x:Name="Layout3Button" Content="3" Width="38" Height="32" Margin="0,0,5,0" Click="LayoutButton_Click" Tag="3" ToolTip="左大 + 右上下 (Ctrl+3)"/>
-                    <Button x:Name="Layout4Button" Content="4" Width="38" Height="32" Click="LayoutButton_Click" Tag="4" ToolTip="4分割 (Ctrl+4)"/>
-                </StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
 
-                <TextBlock Grid.Column="1"
-                           Text="AI Multi Window — Orchestrator MVP"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center"
-                           FontSize="16"
-                           FontWeight="SemiBold"/>
+                    <TextBlock Text="AI Multi Window — 3 Chat"
+                               VerticalAlignment="Center"
+                               FontSize="15"
+                               FontWeight="SemiBold"/>
 
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button Content="4x ChatGPT" Height="32" Padding="12,0" Margin="0,0,6,0" Click="ChatGptMode_Click" ToolTip="4ペインをChatGPTホームに設定"/>
-                    <Button Content="均等に戻す" Height="32" Padding="12,0" Margin="0,0,6,0" Click="ResetLayout_Click" ToolTip="分割比率を初期状態に戻します"/>
-                    <Button Content="全画面" Height="32" Padding="12,0" Click="Fullscreen_Click" ToolTip="F11"/>
-                </StackPanel>
-            </Grid>
-        </Border>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button Content="均等に戻す"
+                                Height="28"
+                                Padding="10,0"
+                                Margin="0,0,5,0"
+                                Click="ResetLayout_Click"
+                                ToolTip="3画面を均等幅に戻します"/>
+                        <Button Content="全画面"
+                                Height="28"
+                                Padding="10,0"
+                                Click="Fullscreen_Click"
+                                ToolTip="F11"/>
+                    </StackPanel>
+                </Grid>
 
-        <Border DockPanel.Dock="Bottom" Background="#F9FAFB" BorderBrush="#E5E7EB" BorderThickness="0,1,0,0" Padding="10,5">
-            <TextBlock x:Name="StatusText" Foreground="#6B7280" Text="準備完了"/>
-        </Border>
+                <Grid Grid.Row="1" Margin="0,6,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
 
-        <Border DockPanel.Dock="Left" Width="310" Background="#F9FAFB" BorderBrush="#D1D5DB" BorderThickness="0,0,1,0" Padding="12">
-            <ScrollViewer VerticalScrollBarVisibility="Auto">
-                <StackPanel>
-                    <TextBlock Text="司令塔" FontSize="18" FontWeight="Bold" Margin="0,0,0,10"/>
-                    <TextBlock Text="依頼" FontWeight="SemiBold"/>
-                    <TextBox x:Name="TaskTextBox"
-                             MinHeight="120"
-                             Margin="0,5,0,10"
-                             Padding="8"
+                    <TextBox x:Name="SharedPromptTextBox"
+                             MinHeight="48"
+                             MaxHeight="96"
+                             Padding="8,6"
                              AcceptsReturn="True"
                              TextWrapping="Wrap"
                              VerticalScrollBarVisibility="Auto"
-                             ToolTip="ここに1回だけ依頼を書きます"/>
+                             ToolTip="3つのチャットへ共通で貼り付けたい文章を入力します"/>
 
-                    <TextBlock Text="Workspace" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                    <TextBox x:Name="WorkspaceTextBox"
-                             Margin="0,0,0,10"
-                             Padding="8"
-                             TextWrapping="NoWrap"
-                             ToolTip="Coderが変更してdotnet buildを実行するローカルフォルダ"/>
-
-                    <WrapPanel Margin="0,0,0,8">
-                        <Button Content="開始" Width="68" Height="34" Margin="0,0,6,6" Click="StartOrchestration_Click"/>
-                        <Button Content="停止" Width="68" Height="34" Margin="0,0,6,6" Click="StopOrchestration_Click"/>
-                        <Button Content="リセット" Width="78" Height="34" Margin="0,0,0,6" Click="ResetOrchestration_Click"/>
-                    </WrapPanel>
-
-                    <Button x:Name="CaptureNextButton"
-                            Content="回答取得 → 次工程"
-                            Height="40"
-                            Margin="0,0,0,6"
+                    <Button Grid.Column="1"
+                            Content="全部へ貼り付け"
+                            MinWidth="125"
+                            Margin="8,0,0,0"
+                            Padding="12,0"
                             FontWeight="SemiBold"
-                            Click="CaptureAndAdvance_Click"/>
-                    <Button x:Name="ResendButton"
-                            Content="現在工程へ再送"
-                            Height="34"
-                            Margin="0,0,0,14"
-                            Click="ResendCurrent_Click"/>
+                            Click="PasteAll_Click"
+                            ToolTip="共通入力を1・2・3すべてのチャット入力欄へ入れます。送信はしません。"/>
+                </Grid>
+            </Grid>
+        </Border>
 
-                    <Border Background="White" BorderBrush="#D1D5DB" BorderThickness="1" CornerRadius="6" Padding="10">
-                        <StackPanel>
-                            <TextBlock Text="進行状況" FontWeight="Bold" Margin="0,0,0,7"/>
-                            <TextBlock x:Name="WorkflowStateText" Text="State: Idle" Margin="0,0,0,4"/>
-                            <TextBlock x:Name="CurrentRoleText" Text="Role: Manager" Margin="0,0,0,4"/>
-                            <TextBlock x:Name="AiCallsText" Text="AI Calls: 0 / 10" Margin="0,0,0,4"/>
-                            <TextBlock x:Name="FixAttemptsText" Text="Fix: 0 / 3" Margin="0,0,0,4"/>
-                            <TextBlock x:Name="StopReasonText" Text="" Foreground="#B91C1C" TextWrapping="Wrap"/>
-                        </StackPanel>
-                    </Border>
-
-                    <TextBlock Margin="0,14,0,4" FontWeight="Bold" Text="役割"/>
-                    <TextBlock Text="1: Manager / 司令塔"/>
-                    <TextBlock Text="2: Planner / 設計"/>
-                    <TextBlock Text="3: Coder / 実装"/>
-                    <TextBlock Text="4: Reviewer / 検査"/>
-
-                    <TextBlock Margin="0,14,0,0"
-                               Foreground="#6B7280"
-                               TextWrapping="Wrap"
-                               Text="開始後は回答完成を検出して次工程へ自動進行します。送信失敗やタイムアウト時は再送・回答取得で再開できます。Coder変更はWorkspaceへ適用し、build/test/diffをReviewerへ渡します。"/>
-                </StackPanel>
-            </ScrollViewer>
+        <Border DockPanel.Dock="Bottom"
+                Background="#F9FAFB"
+                BorderBrush="#E5E7EB"
+                BorderThickness="0,1,0,0"
+                Padding="8,3">
+            <TextBlock x:Name="StatusText"
+                       FontSize="11"
+                       Foreground="#6B7280"
+                       Text="準備完了 — 3つの独立したチャットを表示します"/>
         </Border>
 
         <Grid x:Name="LayoutHost" Background="#111827"/>

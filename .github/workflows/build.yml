@@ -18,14 +18,12 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Restore
-        run: dotnet restore -r win-x64
-
-      - name: Build
-        run: dotnet build -c Release --no-restore
+      - name: Verify V1 workflow
+        shell: powershell
+        run: ./scripts/verify-v1.ps1
 
       - name: Publish
-        run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true --no-restore
+        run: dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
 
       - name: Upload app
         uses: actions/upload-artifact@v4
