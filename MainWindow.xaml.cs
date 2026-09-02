@@ -8,6 +8,13 @@ namespace AiMultiWindow;
 
 public partial class MainWindow : Window
 {
+    private static readonly (string Name, string Url)[] AiPresets =
+    [
+        ("ChatGPT", "https://chatgpt.com/"),
+        ("Gemini", "https://gemini.google.com/"),
+        ("Claude", "https://claude.ai/")
+    ];
+
     private readonly AppSettings _settings;
     private readonly BrowserPane[] _panes;
     private bool _isFullscreen;
@@ -77,6 +84,7 @@ public partial class MainWindow : Window
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var title = new TextBlock
         {
@@ -84,6 +92,32 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.Bold,
             FontSize = 15,
             VerticalAlignment = VerticalAlignment.Center
+        };
+
+        var presetSelector = new ComboBox
+        {
+            MinWidth = 92,
+            Height = 30,
+            Margin = new Thickness(0, 0, 6, 0),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            ToolTip = "この画面で使うAIを切り替えます"
+        };
+
+        foreach (var preset in AiPresets)
+            presetSelector.Items.Add(new ComboBoxItem { Content = preset.Name, Tag = preset.Url });
+
+        var initialPresetIndex = DetectPresetIndex(_panes[paneIndex].HomeUrl);
+        if (initialPresetIndex >= 0)
+            presetSelector.SelectedIndex = initialPresetIndex;
+
+        presetSelector.SelectionChanged += (_, _) =>
+        {
+            if (presetSelector.SelectedItem is not ComboBoxItem { Tag: string url })
+                return;
+
+            _panes[paneIndex].HomeUrl = url;
+            _panes[paneIndex].NavigateHome();
+            StatusText.Text = $"{paneIndex + 1}: {presetSelector.Text} に切り替えました";
         };
 
         var pasteButton = new Button
@@ -110,9 +144,11 @@ public partial class MainWindow : Window
         copyButton.Click += CopyFromPane_Click;
 
         Grid.SetColumn(title, 0);
-        Grid.SetColumn(pasteButton, 1);
-        Grid.SetColumn(copyButton, 2);
+        Grid.SetColumn(presetSelector, 1);
+        Grid.SetColumn(pasteButton, 2);
+        Grid.SetColumn(copyButton, 3);
         headerGrid.Children.Add(title);
+        headerGrid.Children.Add(presetSelector);
         headerGrid.Children.Add(pasteButton);
         headerGrid.Children.Add(copyButton);
         header.Child = headerGrid;
@@ -124,6 +160,21 @@ public partial class MainWindow : Window
 
         Grid.SetColumn(card, column);
         LayoutHost.Children.Add(card);
+    }
+
+    private static int DetectPresetIndex(string? url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var current))
+            return -1;
+
+        for (var i = 0; i < AiPresets.Length; i++)
+        {
+            if (Uri.TryCreate(AiPresets[i].Url, UriKind.Absolute, out var preset) &&
+                string.Equals(current.Host, preset.Host, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+
+        return -1;
     }
 
     private void AddSplitter(int column)
